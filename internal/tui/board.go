@@ -26,6 +26,8 @@ type BoardModel struct {
 	searchQuery string
 	confirm     *confirmDialog
 	showHelp    bool
+	width       int
+	height      int
 }
 
 type confirmDialog struct {
@@ -111,6 +113,10 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
 	case tea.KeyMsg:
 		tasks := m.visibleTasksInCol(boardPhases[m.colIdx])
 		switch {
@@ -195,70 +201,130 @@ func (m BoardModel) visibleTasksInCol(phase state.Phase) []state.Task {
 }
 
 func (m BoardModel) View() string {
-	if m.showForm {
-		return lipgloss.Place(80, 24, lipgloss.Center, lipgloss.Center, m.form.View())
+	w := m.width
+	if w == 0 {
+		w = 120
+	}
+	h := m.height
+	if h == 0 {
+		h = 30
 	}
 
-	cols := make([]string, len(boardPhases))
+	if m.showForm {
+		return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, m.form.View())
+	}
+
+	// Header line (1 row) + divider (1 row) + help bar (1 row) = 3 rows reserved
+	// Column header takes 1 row, leaving h-5 rows for cards
+	boardHeight := h - 5
+	if boardHeight < 4 {
+		boardHeight = 4
+	}
+
+	colWidth := (w - len(boardPhases) + 1) / len(boardPhases)
+	if colWidth < 20 {
+		colWidth = 20
+	}
+
+	divider := lipgloss.NewStyle().
+		Foreground(colorMuted).
+		Render(strings.Repeat("│\n", boardHeight+2))
+
+	colParts := make([]string, 0, len(boardPhases)*2)
 	for i, phase := range boardPhases {
 		tasks := m.visibleTasksInCol(phase)
-		label := fmt.Sprintf("%s (%d)", phaseLabels[phase], len(tasks))
-		header := StyleColumnHeader.Render(label)
 
-		var cards []string
+		// Column header with count badge
+		isActive := i == m.colIdx
+		headerStyle := StyleColumnHeader.Width(colWidth)
+		if isActive {
+			headerStyle = headerStyle.Foreground(colorPrimary)
+		}
+		label := fmt.Sprintf("%s  %d", phaseLabels[phase], len(tasks))
+		header := headerStyle.Render(label)
+
+		// Render cards, truncated to fit board height
+		var cardLines []string
+		usedLines := 0
 		for j, t := range tasks {
-			selected := i == m.colIdx && j == m.rowIdx
-			cards = append(cards, renderCard(t, selected))
+			selected := isActive && j == m.rowIdx
+			card := renderCard(t, selected, colWidth-2)
+			cardH := strings.Count(card, "\n") + 1
+			if usedLines+cardH > boardHeight {
+				break
+			}
+			cardLines = append(cardLines, card)
+			usedLines += cardH
 		}
 
-		col := lipgloss.JoinVertical(lipgloss.Left, append([]string{header}, cards...)...)
-		cols[i] = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder(), false, true, false, false).
-			BorderForeground(colorMuted).
-			PaddingRight(1).
-			Render(col)
+		colContent := lipgloss.JoinVertical(lipgloss.Left, cardLines...)
+		col := lipgloss.NewStyle().
+			Width(colWidth).
+			Height(boardHeight).
+			Render(lipgloss.JoinVertical(lipgloss.Left, header, colContent))
+
+		colParts = append(colParts, col)
+		if i < len(boardPhases)-1 {
+			colParts = append(colParts, divider)
+		}
 	}
 
-	board := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
+	board := lipgloss.JoinHorizontal(lipgloss.Top, colParts...)
 
-	statusBar := StyleHelp.Render("n new  L advance  H retreat  enter open  / search  ? help  q quit")
+	// Top header
+	appHeader := lipgloss.NewStyle().
+		Width(w).
+		BorderBottom(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(colorMuted).
+		Render(StyleTitle.Render("orka") + StyleHelp.Render("  agent kanban"))
+
+	// Help bar — always pinned at bottom
+	helpBar := StyleHelp.Render("  n new   L advance   H retreat   enter open   / search   ? help   q quit")
 	if m.searchMode {
-		statusBar = StyleStatusLive.Render("search: ") + m.searchQuery + "█"
+		helpBar = "  " + StyleStatusLive.Render("search:") + " " + m.searchQuery + "█"
 	}
 	if m.confirm != nil {
-		statusBar = StyleConfirmPrompt.Render(m.confirm.message)
+		helpBar = "  " + StyleConfirmPrompt.Render(m.confirm.message)
 	}
+	helpBarRendered := lipgloss.NewStyle().
+		Width(w).
+		BorderTop(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(colorMuted).
+		Foreground(colorMuted).
+		Render(helpBar)
 
 	if m.showHelp {
-		helpText := "Board keys:\n" +
-			"  n        new task\n" +
-			"  enter    open task view\n" +
-			"  L        advance phase\n" +
-			"  H        retreat phase\n" +
-			"  /        search tasks\n" +
-			"  j/k      navigate cards\n" +
-			"  h/l      navigate columns\n" +
-			"  ?        toggle help\n" +
+		helpText := "  n        new task\n" +
+			"  enter    open task\n" +
+			"  L / H    advance / retreat phase\n" +
+			"  j / k    navigate cards\n" +
+			"  h / l    navigate columns\n" +
+			"  /        search\n" +
+			"  ?        close help\n" +
 			"  q        quit"
 		overlay := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorPrimary).
-			Padding(1, 2).
-			Render(helpText)
-		board = lipgloss.Place(80, 20, lipgloss.Center, lipgloss.Center, overlay)
+			Padding(1, 3).
+			Render(StyleTitle.Render("keyboard shortcuts") + "\n\n" + helpText)
+		board = lipgloss.Place(w, boardHeight+1, lipgloss.Center, lipgloss.Center, overlay)
 	}
 
-	header := StyleTitle.Render("orka") + StyleHelp.Render("  agent kanban")
-	return lipgloss.JoinVertical(lipgloss.Left, header, board, statusBar)
+	return lipgloss.JoinVertical(lipgloss.Left, appHeader, board, helpBarRendered)
 }
 
-func renderCard(t state.Task, selected bool) string {
-	style := StyleCard
+func renderCard(t state.Task, selected bool, width int) string {
+	if width < 10 {
+		width = 10
+	}
+	style := StyleCard.Width(width)
 	if selected {
-		style = StyleCardSelected
+		style = StyleCardSelected.Width(width)
 	}
 	if t.Error != nil {
-		style = StyleCardError
+		style = StyleCardError.Width(width)
 	}
 
 	elapsed := time.Since(t.PhaseStartedAt).Round(time.Minute).String()
@@ -266,14 +332,19 @@ func renderCard(t state.Task, selected bool) string {
 	statusLine := StyleStatusMuted.Render(elapsed)
 	if t.Error != nil {
 		msg := *t.Error
-		if len(msg) > 16 {
-			msg = msg[:16] + "…"
+		if len(msg) > 20 {
+			msg = msg[:20] + "…"
 		}
 		statusLine = StyleStatusError.Render("✗ " + msg)
 	}
 
+	title := t.Title
+	if len(title) > width-2 {
+		title = title[:width-3] + "…"
+	}
+
 	content := lipgloss.JoinVertical(lipgloss.Left,
-		t.Title,
+		title,
 		StyleStatusMuted.Render(t.Agent),
 		statusLine,
 	)
