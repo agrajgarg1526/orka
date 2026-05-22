@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -177,113 +176,100 @@ func (m FormModel) View() string {
 		h = 24
 	}
 
-	boxW := 52
-	if boxW > w-4 {
-		boxW = w - 4
-	}
+	innerW := 44
 
-	// Progress dots
-	dots := ""
+	// Progress bar: filled blocks for done, current, empty for ahead
+	progressBar := ""
 	for i := formStep(0); i < stepCount; i++ {
-		if i == m.step {
-			dots += lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render("●")
-		} else if i < m.step {
-			dots += lipgloss.NewStyle().Foreground(colorSuccess).Render("●")
-		} else {
-			dots += lipgloss.NewStyle().Foreground(colorMuted).Render("○")
+		var seg string
+		switch {
+		case i < m.step:
+			seg = lipgloss.NewStyle().Foreground(colorSuccess).Render("██")
+		case i == m.step:
+			seg = lipgloss.NewStyle().Foreground(colorPrimary).Render("██")
+		default:
+			seg = lipgloss.NewStyle().Foreground(lipgloss.Color("#2D2D2D")).Render("██")
 		}
+		progressBar += seg
 		if i < stepCount-1 {
-			dots += lipgloss.NewStyle().Foreground(colorMuted).Render(" ─ ")
+			progressBar += " "
 		}
 	}
 
-	progress := fmt.Sprintf("Step %d of %d", int(m.step)+1, int(stepCount))
-
-	// Step question
+	// Step question — large, prominent
 	question := lipgloss.NewStyle().
 		Bold(true).
+		Width(innerW).
 		Foreground(lipgloss.Color("#F9FAFB")).
 		Render(stepTitles[m.step])
 
-	// Step-specific input area
+	// Input area
 	var inputArea string
 	var hint string
 
 	switch m.step {
 	case stepTitle:
 		inputArea = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
+			Width(innerW).
+			BorderBottom(true).
+			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(colorPrimary).
-			Padding(0, 1).
-			Width(boxW - 6).
-			Render(m.titleInput.View())
+			Render("  " + m.titleInput.View())
 		hint = "enter to continue   esc to cancel"
 
 	case stepAgent:
-		inputArea = renderSelector(agentOptions, m.agentIdx, boxW-6)
-		hint = "←/→ or ↑/↓ to select   enter to confirm"
+		inputArea = renderSelector(agentOptions, m.agentIdx, innerW)
+		hint = "↑/↓ to move   enter to select"
 
 	case stepPlugin:
-		inputArea = renderSelector(pluginOptions, m.pluginIdx, boxW-6)
-		hint = "←/→ or ↑/↓ to select   enter to confirm"
+		inputArea = renderSelector(pluginOptions, m.pluginIdx, innerW)
+		hint = "↑/↓ to move   enter to select"
 
 	case stepSkipResearch:
-		yesStyle := lipgloss.NewStyle().Padding(0, 2)
-		noStyle := lipgloss.NewStyle().Padding(0, 2)
-		if m.skipRes {
-			yesStyle = yesStyle.Background(colorPrimary).Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
-		} else {
-			noStyle = noStyle.Background(colorPrimary).Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
-		}
-		inputArea = lipgloss.JoinHorizontal(lipgloss.Top,
-			yesStyle.Render("Yes, skip"),
-			lipgloss.NewStyle().Foreground(colorMuted).Render("   "),
-			noStyle.Render("No, include"),
-		)
+		inputArea = renderYesNo(m.skipRes, innerW)
 		hint = "←/→ or space to toggle   enter to confirm"
 
 	case stepNotes:
 		inputArea = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
+			Width(innerW).
+			BorderBottom(true).
+			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(colorPrimary).
-			Padding(0, 1).
-			Width(boxW - 6).
-			Render(m.notesInput.View())
-		hint = "enter to create task   esc to go back"
+			Render("  " + m.notesInput.View())
+		hint = "enter to create   esc to go back"
 	}
 
-	// Summary of previous steps
-	var summary []string
+	// Summary of confirmed steps shown as small pills above the question
+	var pills []string
 	if m.step > stepTitle {
-		summary = append(summary, StyleStatusMuted.Render("Task:   ")+m.titleInput.Value())
+		pills = append(pills, pill(m.titleInput.Value()))
 	}
 	if m.step > stepAgent {
-		summary = append(summary, StyleStatusMuted.Render("Agent:  ")+agentOptions[m.agentIdx])
+		pills = append(pills, pill(agentOptions[m.agentIdx]))
 	}
 	if m.step > stepPlugin {
-		summary = append(summary, StyleStatusMuted.Render("Plugin: ")+pluginOptions[m.pluginIdx])
+		pills = append(pills, pill(pluginOptions[m.pluginIdx]))
 	}
 	if m.step > stepSkipResearch {
-		skipLabel := "no"
 		if m.skipRes {
-			skipLabel = "yes"
+			pills = append(pills, pill("skip research"))
+		} else {
+			pills = append(pills, pill("with research"))
 		}
-		summary = append(summary, StyleStatusMuted.Render("Skip research: ")+skipLabel)
 	}
 
-	summaryStr := ""
-	if len(summary) > 0 {
-		summaryStr = strings.Join(summary, "\n") + "\n\n"
+	pillRow := ""
+	if len(pills) > 0 {
+		pillRow = strings.Join(pills, " ") + "\n\n"
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Foreground(colorMuted).Render(progress),
+		progressBar,
 		"",
-		dots,
-		"",
-		summaryStr+question,
+		pillRow+question,
 		"",
 		inputArea,
+		"",
 		"",
 		StyleHelp.Render(hint),
 	)
@@ -292,7 +278,7 @@ func (m FormModel) View() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colorPrimary).
 		Padding(1, 3).
-		Width(boxW)
+		Width(innerW+8)
 
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box.Render(content))
 }
@@ -302,19 +288,42 @@ func renderSelector(options []string, selected int, width int) string {
 	for i, opt := range options {
 		if i == selected {
 			rows = append(rows, lipgloss.NewStyle().
-				Background(colorPrimary).
-				Foreground(lipgloss.Color("#FFFFFF")).
+				Foreground(colorPrimary).
 				Bold(true).
 				Width(width).
-				Padding(0, 1).
-				Render("▶  "+opt))
+				Render("  ▸ "+opt))
 		} else {
 			rows = append(rows, lipgloss.NewStyle().
 				Foreground(colorMuted).
 				Width(width).
-				Padding(0, 1).
-				Render("   "+opt))
+				Render("    "+opt))
 		}
 	}
 	return strings.Join(rows, "\n")
+}
+
+func renderYesNo(skipRes bool, width int) string {
+	yes := lipgloss.NewStyle().Padding(0, 2)
+	no := lipgloss.NewStyle().Padding(0, 2)
+	if skipRes {
+		yes = yes.Background(colorPrimary).Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
+		no = no.Foreground(colorMuted)
+	} else {
+		no = no.Background(colorPrimary).Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
+		yes = yes.Foreground(colorMuted)
+	}
+	_ = width
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		yes.Render("Yes, skip"),
+		lipgloss.NewStyle().Foreground(colorMuted).Render("  "),
+		no.Render("No, include"),
+	)
+}
+
+func pill(s string) string {
+	return lipgloss.NewStyle().
+		Background(lipgloss.Color("#1E1E2E")).
+		Foreground(colorSuccess).
+		Padding(0, 1).
+		Render("✓ " + s)
 }
