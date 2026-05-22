@@ -64,19 +64,23 @@ func NewBoardModel(st *state.State, projectID, statePath string) BoardModel {
 func (m BoardModel) Init() tea.Cmd { return nil }
 
 func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle form result messages emitted as commands by the form
+	switch msg := msg.(type) {
+	case FormSubmitMsg:
+		if msg.Result.Title != "" {
+			m.st.AddTask(m.projectID, msg.Result.Title, msg.Result.Agent, msg.Result.Plugin, msg.Result.SkipResearch)
+			_ = m.st.Save(m.statePath)
+		}
+		m.showForm = false
+		return m, nil
+	case FormCancelMsg:
+		m.showForm = false
+		return m, nil
+	}
+
 	if m.showForm {
 		updated, cmd := m.form.Update(msg)
 		m.form = updated.(FormModel)
-		switch msg := msg.(type) {
-		case FormSubmitMsg:
-			if msg.Result.Title != "" {
-				m.st.AddTask(m.projectID, msg.Result.Title, msg.Result.Agent, msg.Result.Plugin, msg.Result.SkipResearch)
-				_ = m.st.Save(m.statePath)
-			}
-			m.showForm = false
-		case FormCancelMsg:
-			m.showForm = false
-		}
 		return m, cmd
 	}
 
