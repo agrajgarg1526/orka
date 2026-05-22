@@ -214,86 +214,77 @@ func (m BoardModel) View() string {
 		return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, m.form.View())
 	}
 
-	// Header line (1 row) + divider (1 row) + help bar (1 row) = 3 rows reserved
-	// Column header takes 1 row, leaving h-5 rows for cards
+	// Layout: 1 app header + 1 header border + 1 col-header row + 1 help-border + 1 help row = 5 fixed rows
+	// The remaining rows are for cards.
 	boardHeight := h - 5
 	if boardHeight < 4 {
 		boardHeight = 4
 	}
 
-	colWidth := (w - len(boardPhases) + 1) / len(boardPhases)
-	if colWidth < 20 {
-		colWidth = 20
+	// Each column gets an equal share of width minus 1px left-border per col (except first)
+	numCols := len(boardPhases)
+	colWidth := (w - (numCols - 1)) / numCols
+	if colWidth < 18 {
+		colWidth = 18
 	}
 
-	divider := lipgloss.NewStyle().
-		Foreground(colorMuted).
-		Render(strings.Repeat("│\n", boardHeight+2))
-
-	colParts := make([]string, 0, len(boardPhases)*2)
+	// Build each column as a fixed-height block.
+	// Columns 1..N get a left border as the divider — this renders correctly
+	// because lipgloss applies the border before width padding.
+	cols := make([]string, numCols)
 	for i, phase := range boardPhases {
 		tasks := m.visibleTasksInCol(phase)
-
-		// Column header with count badge
 		isActive := i == m.colIdx
-		headerStyle := StyleColumnHeader.Width(colWidth)
-		if isActive {
-			headerStyle = headerStyle.Foreground(colorPrimary)
-		}
-		label := fmt.Sprintf("%s  %d", phaseLabels[phase], len(tasks))
-		header := headerStyle.Render(label)
 
-		// Render cards, truncated to fit board height
-		var cardLines []string
-		usedLines := 0
+		// Header
+		headerFg := lipgloss.Color("#9CA3AF") // muted white
+		if isActive {
+			headerFg = colorPrimary
+		}
+		hdr := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(headerFg).
+			Width(colWidth).
+			Padding(0, 1).
+			Render(fmt.Sprintf("%s (%d)", phaseLabels[phase], len(tasks)))
+
+		// Cards — render up to boardHeight lines worth
+		var rendered []string
+		usedRows := 0
 		for j, t := range tasks {
-			selected := isActive && j == m.rowIdx
-			card := renderCard(t, selected, colWidth-2)
-			cardH := strings.Count(card, "\n") + 1
-			if usedLines+cardH > boardHeight {
+			if usedRows >= boardHeight {
 				break
 			}
-			cardLines = append(cardLines, card)
-			usedLines += cardH
+			card := renderCard(t, isActive && j == m.rowIdx, colWidth-4)
+			h := strings.Count(card, "\n") + 1
+			if usedRows+h > boardHeight {
+				break
+			}
+			rendered = append(rendered, card)
+			usedRows += h
 		}
 
-		colContent := lipgloss.JoinVertical(lipgloss.Left, cardLines...)
-		col := lipgloss.NewStyle().
+		// Pad remaining space so all columns are the same height
+		body := lipgloss.NewStyle().
 			Width(colWidth).
 			Height(boardHeight).
-			Render(lipgloss.JoinVertical(lipgloss.Left, header, colContent))
+			Padding(0, 1).
+			Render(strings.Join(rendered, "\n"))
 
-		colParts = append(colParts, col)
-		if i < len(boardPhases)-1 {
-			colParts = append(colParts, divider)
+		colContent := lipgloss.JoinVertical(lipgloss.Left, hdr, body)
+
+		colStyle := lipgloss.NewStyle().Width(colWidth)
+		if i > 0 {
+			// Left border acts as the column divider
+			colStyle = colStyle.
+				BorderLeft(true).
+				BorderStyle(lipgloss.NormalBorder()).
+				BorderForeground(colorMuted)
 		}
+		cols[i] = colStyle.Render(colContent)
 	}
 
-	board := lipgloss.JoinHorizontal(lipgloss.Top, colParts...)
-
-	// Top header
-	appHeader := lipgloss.NewStyle().
-		Width(w).
-		BorderBottom(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(colorMuted).
-		Render(StyleTitle.Render("orka") + StyleHelp.Render("  agent kanban"))
-
-	// Help bar — always pinned at bottom
-	helpBar := StyleHelp.Render("  n new   L advance   H retreat   enter open   / search   ? help   q quit")
-	if m.searchMode {
-		helpBar = "  " + StyleStatusLive.Render("search:") + " " + m.searchQuery + "█"
-	}
-	if m.confirm != nil {
-		helpBar = "  " + StyleConfirmPrompt.Render(m.confirm.message)
-	}
-	helpBarRendered := lipgloss.NewStyle().
-		Width(w).
-		BorderTop(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(colorMuted).
-		Foreground(colorMuted).
-		Render(helpBar)
+	board := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
 
 	if m.showHelp {
 		helpText := "  n        new task\n" +
@@ -312,7 +303,32 @@ func (m BoardModel) View() string {
 		board = lipgloss.Place(w, boardHeight+1, lipgloss.Center, lipgloss.Center, overlay)
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, appHeader, board, helpBarRendered)
+	// App header — bold title + subtitle, bottom border
+	appHeader := lipgloss.NewStyle().
+		Width(w).
+		BorderBottom(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(colorMuted).
+		Padding(0, 1).
+		Render(StyleTitle.Render("orka") + StyleHelp.Render("  agent kanban"))
+
+	// Help bar — always at the bottom, top border
+	helpContent := "n new   L advance   H retreat   enter open   / search   ? help   q quit"
+	if m.searchMode {
+		helpContent = StyleStatusLive.Render("search:") + " " + m.searchQuery + "█"
+	}
+	if m.confirm != nil {
+		helpContent = StyleConfirmPrompt.Render(m.confirm.message)
+	}
+	helpBar := lipgloss.NewStyle().
+		Width(w).
+		BorderTop(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(colorMuted).
+		Padding(0, 1).
+		Render(StyleHelp.Render(helpContent))
+
+	return lipgloss.JoinVertical(lipgloss.Left, appHeader, board, helpBar)
 }
 
 func renderCard(t state.Task, selected bool, width int) string {
