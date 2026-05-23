@@ -36,6 +36,7 @@ type confirmDialog struct {
 	message        string
 	onYes          func()
 	startOnConfirm bool // task view: start agent after confirm
+	resetSession   bool // task view: clear sessionStarted after confirm
 }
 
 var boardPhases = []state.Phase{
@@ -417,15 +418,15 @@ func (m BoardModel) View() string {
 	board := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
 
 	if m.showHelp {
-		helpText := "  n        new task\n" +
-			"  enter    open task\n" +
-			"  d        delete task\n" +
-			"  L / H    advance / retreat phase\n" +
-			"  j / k    navigate cards\n" +
-			"  h / l    navigate columns\n" +
-			"  /        search\n" +
-			"  ?        close help\n" +
-			"  q        quit"
+		helpText := "  n          new task\n" +
+			"  enter      open task\n" +
+			"  d          delete task\n" +
+			"  l / h      advance / retreat phase\n" +
+			"  ↑ / ↓      navigate cards\n" +
+			"  ← / →      navigate columns\n" +
+			"  /          search\n" +
+			"  ?          close help\n" +
+			"  q          quit"
 		overlay := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorPrimary).
@@ -450,10 +451,10 @@ func (m BoardModel) View() string {
 	if len(selectedTasks) > 0 && m.rowIdx < len(selectedTasks) {
 		t := selectedTasks[m.rowIdx]
 		if next := t.NextPhase(); next != "" {
-			advanceLabel = "L → " + phaseLabels[next]
+			advanceLabel = "l →" + phaseLabels[next]
 		}
 		if prev := t.PrevPhase(); prev != "" {
-			retreatLabel = "H → " + phaseLabels[prev]
+			retreatLabel = "h →" + phaseLabels[prev]
 		}
 	}
 	phaseControls := ""
@@ -467,7 +468,7 @@ func (m BoardModel) View() string {
 	}
 	helpContent := "n new" + phaseControls + taskControls + "   / search   ? help   esc projects   q quit"
 	if narrowMode {
-		helpContent = fmt.Sprintf("h/l cols  (%d/%d)  ", m.colIdx+1, numCols) + helpContent
+		helpContent = fmt.Sprintf("←/→ cols  (%d/%d)  ", m.colIdx+1, numCols) + helpContent
 	}
 	if m.searchMode {
 		helpContent = StyleStatusLive.Render("search:") + " " + m.searchQuery + "█"

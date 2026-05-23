@@ -23,6 +23,11 @@ type AgentDoneMsg struct {
 }
 type tickMsg time.Time
 
+type diffFile struct {
+	name string
+	diff string // the diff chunk for this file only
+}
+
 type TaskModel struct {
 	task           state.Task
 	st             *state.State
@@ -33,7 +38,13 @@ type TaskModel struct {
 	notesInput     textinput.Model
 	confirm        *confirmDialog
 	tmuxOutput     string
-	diffStat       string
+	diffRaw        string     // full git diff output, cached on tick
+	diffStat       string     // shortstat line, cached on tick
+	diffFiles      []diffFile // parsed per-file diffs
+	diffOpen       bool       // diff panel visible
+	diffFocusRight bool       // true when diff content pane is focused (vs file list)
+	diffCursor     int        // selected file index in diff panel
+	diffScroll     int        // scroll offset for the file diff view
 	cardScroll     int
 	width          int
 	height         int
@@ -217,8 +228,18 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch k.String() {
 			case "y", "Y":
 				startAgent := m.confirm.startOnConfirm
+				doReset := m.confirm.resetSession
 				m.confirm.onYes()
 				m.confirm = nil
+				if doReset {
+					m.sessionStarted = false
+					m.task.SessionStarted = false
+					for i := range m.st.Tasks {
+						if m.st.Tasks[i].ID == m.task.ID {
+							m.st.Tasks[i].SessionStarted = false
+						}
+					}
+				}
 				_ = m.st.Save(m.statePath)
 				if startAgent {
 					m, cmd := m.launchAgent()
@@ -273,7 +294,16 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		m.diffStat = gitDiffStat(worktreeDir)
+		m.diffStat = gitShortStat(worktreeDir)
+		raw := gitDiff(worktreeDir)
+		if raw != m.diffRaw {
+			m.diffRaw = raw
+			m.diffFiles = parseDiffFiles(raw)
+			if m.diffCursor >= len(m.diffFiles) {
+				m.diffCursor = 0
+				m.diffScroll = 0
+			}
+		}
 		if worktreeDir != "" {
 			if actual := currentBranch(worktreeDir); actual != "" && actual != m.task.Branch {
 				m.task.Branch = actual
@@ -296,6 +326,64 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Diff panel captures navigation keys when open.
+		if m.diffOpen {
+			switch msg.String() {
+			case "esc":
+				if m.diffFocusRight {
+					m.diffFocusRight = false
+				} else {
+					m.diffOpen = false
+				}
+			case "d":
+				m.diffOpen = false
+			case "right":
+				m.diffFocusRight = true
+			case "left":
+				m.diffFocusRight = false
+			case "e":
+				if len(m.diffFiles) > 0 && m.diffCursor < len(m.diffFiles) {
+					worktreeDir := ""
+					for _, p := range m.st.Projects {
+						if p.ID == m.task.ProjectID {
+							if m.task.Branch != "" {
+								worktreeDir = worktree.WorktreePath(p.Path, m.task.Branch)
+							} else {
+								worktreeDir = p.Path
+							}
+							break
+						}
+					}
+					filePath := m.diffFiles[m.diffCursor].name
+					if worktreeDir != "" {
+						filePath = worktreeDir + "/" + filePath
+					}
+					c := exec.Command("vim", filePath)
+					return m, tea.ExecProcess(c, func(err error) tea.Msg { return nil })
+				}
+			case "down":
+				if m.diffFocusRight {
+					m.diffScroll++
+				} else {
+					if m.diffCursor < len(m.diffFiles)-1 {
+						m.diffCursor++
+						m.diffScroll = 0
+					}
+				}
+			case "up":
+				if m.diffFocusRight {
+					if m.diffScroll > 0 {
+						m.diffScroll--
+					}
+				} else {
+					if m.diffCursor > 0 {
+						m.diffCursor--
+						m.diffScroll = 0
+					}
+				}
+			}
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, TaskKeys.Back):
 			return m, func() tea.Msg { return BackToBoardMsg{} }
@@ -310,6 +398,12 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notesInput.Focus()
 		case key.Matches(msg, TaskKeys.Stop):
 			// Nothing to stop — agent runs in foreground, user exits it directly.
+		case key.Matches(msg, TaskKeys.Diff):
+			if len(m.diffFiles) > 0 {
+				m.diffOpen = true
+				m.diffCursor = 0
+				m.diffScroll = 0
+			}
 		case key.Matches(msg, TaskKeys.Restart):
 			m, cmd := m.launchAgent()
 			return m, cmd
@@ -324,6 +418,7 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.st.UpdateTaskPhase(m.task.ID, nextPhase)
 						m.task.Phase = nextPhase
 					},
+					resetSession: true,
 				}
 			}
 		case key.Matches(msg, TaskKeys.Retreat):
@@ -336,6 +431,7 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.st.UpdateTaskPhase(m.task.ID, prevPhase)
 						m.task.Phase = prevPhase
 					},
+					resetSession: true,
 				}
 			}
 		}
@@ -354,9 +450,8 @@ func currentBranch(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// gitDiffStat returns a short summary of uncommitted changes in dir, e.g. "3 files  +42 −7".
-// Returns empty string if dir is empty, not a git repo, or has no changes.
-func gitDiffStat(dir string) string {
+// gitShortStat returns a one-line summary like "3 files changed, 42 insertions(+), 7 deletions(-)".
+func gitShortStat(dir string) string {
 	if dir == "" {
 		return ""
 	}
@@ -364,7 +459,6 @@ func gitDiffStat(dir string) string {
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil || len(out) == 0 {
-		// Try staged+unstaged vs initial commit
 		cmd2 := exec.Command("git", "diff", "--shortstat")
 		cmd2.Dir = dir
 		out, err = cmd2.Output()
@@ -373,6 +467,57 @@ func gitDiffStat(dir string) string {
 		}
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// gitDiff returns the full diff of uncommitted changes in dir.
+func gitDiff(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	cmd := exec.Command("git", "diff", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		cmd2 := exec.Command("git", "diff")
+		cmd2.Dir = dir
+		out, err = cmd2.Output()
+		if err != nil || len(out) == 0 {
+			return ""
+		}
+	}
+	return strings.TrimRight(string(out), "\n")
+}
+
+// parseDiffFiles splits a full git diff into per-file chunks.
+func parseDiffFiles(raw string) []diffFile {
+	if raw == "" {
+		return nil
+	}
+	var files []diffFile
+	var current *diffFile
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.HasPrefix(line, "diff --git ") {
+			if current != nil {
+				current.diff = strings.TrimRight(current.diff, "\n")
+				files = append(files, *current)
+			}
+			// Extract filename from "diff --git a/foo b/foo"
+			parts := strings.Fields(line)
+			name := ""
+			if len(parts) >= 4 {
+				name = strings.TrimPrefix(parts[3], "b/")
+			}
+			current = &diffFile{name: name}
+		}
+		if current != nil {
+			current.diff += line + "\n"
+		}
+	}
+	if current != nil {
+		current.diff = strings.TrimRight(current.diff, "\n")
+		files = append(files, *current)
+	}
+	return files
 }
 
 func renderPhaseBar(current state.Phase, skipResearch bool, width int) string {
@@ -413,6 +558,167 @@ func phaseIndex(p state.Phase) int {
 		}
 	}
 	return -1
+}
+
+// renderDiffPanel renders a two-pane diff viewer: file list on the left, diff on the right.
+func (m TaskModel) renderDiffPanel(w, bodyH, cardW int) string {
+	fileListW := 30
+	if fileListW > w/3 {
+		fileListW = w / 3
+	}
+	diffPaneW := w - fileListW - 3 // divider(1) + margins(2)
+	if diffPaneW < 20 {
+		diffPaneW = 20
+	}
+	innerH := bodyH - 4 // border top+bottom(2) + top margin(2)
+
+	// ── file list ──
+	addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4ADE80"))
+	delStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171"))
+	hunkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#60A5FA"))
+	fileHeaderStyle := lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
+
+	var fileListLines []string
+	for i, f := range m.diffFiles {
+		name := f.name
+		runes := []rune(name)
+		maxName := fileListW - 4
+		if len(runes) > maxName {
+			name = "…" + string(runes[len(runes)-maxName+1:])
+		}
+		if i == m.diffCursor {
+			fileListLines = append(fileListLines, lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Background(colorPrimary).
+				Width(fileListW-2).
+				Render(name))
+		} else {
+			fileListLines = append(fileListLines, lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#9CA3AF")).
+				Width(fileListW-2).
+				Render(name))
+		}
+	}
+	// Pad to innerH
+	for len(fileListLines) < innerH {
+		fileListLines = append(fileListLines, "")
+	}
+	if len(fileListLines) > innerH {
+		// scroll file list to keep cursor visible
+		start := m.diffCursor - innerH + 1
+		if start < 0 {
+			start = 0
+		}
+		if m.diffCursor-start < innerH {
+			fileListLines = fileListLines[start:]
+		}
+		if len(fileListLines) > innerH {
+			fileListLines = fileListLines[:innerH]
+		}
+	}
+	fileListBorder := colorPrimary
+	if m.diffFocusRight {
+		fileListBorder = colorMuted
+	}
+	fileListPanel := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(fileListBorder).
+		Padding(0, 1).
+		Width(fileListW).
+		Height(bodyH - 4).
+		Render(lipgloss.NewStyle().Bold(true).Foreground(colorPrimary).Render("files") + "\n\n" + strings.Join(fileListLines, "\n"))
+
+	// ── diff pane ──
+	var diffPaneContent string
+	textW := diffPaneW - 4
+	if len(m.diffFiles) > 0 && m.diffCursor < len(m.diffFiles) {
+		rawLines := strings.Split(m.diffFiles[m.diffCursor].diff, "\n")
+		// apply scroll
+		scroll := m.diffScroll
+		maxDiffScroll := len(rawLines) - 1
+		if scroll > maxDiffScroll {
+			scroll = maxDiffScroll
+		}
+		if scroll < 0 {
+			scroll = 0
+		}
+		visLines := innerH - 2 // header(1) + blank(1)
+		if visLines < 1 {
+			visLines = 1
+		}
+		visible := rawLines[scroll:]
+		if len(visible) > visLines {
+			visible = visible[:visLines]
+		}
+		var rendered []string
+		for _, dl := range visible {
+			runes := []rune(dl)
+			if len(runes) > textW {
+				dl = string(runes[:textW-1]) + "…"
+			}
+			switch {
+			case strings.HasPrefix(dl, "+++") || strings.HasPrefix(dl, "---"):
+				rendered = append(rendered, fileHeaderStyle.Render(dl))
+			case strings.HasPrefix(dl, "diff ") || strings.HasPrefix(dl, "index "):
+				rendered = append(rendered, fileHeaderStyle.Render(dl))
+			case strings.HasPrefix(dl, "@@"):
+				rendered = append(rendered, hunkStyle.Render(dl))
+			case strings.HasPrefix(dl, "+"):
+				rendered = append(rendered, addStyle.Render(dl))
+			case strings.HasPrefix(dl, "-"):
+				rendered = append(rendered, delStyle.Render(dl))
+			default:
+				rendered = append(rendered, StyleStatusMuted.Render(dl))
+			}
+		}
+		diffPaneContent = strings.Join(rendered, "\n")
+	} else {
+		diffPaneContent = StyleStatusMuted.Render("no diff")
+	}
+
+	fileName := ""
+	if len(m.diffFiles) > 0 && m.diffCursor < len(m.diffFiles) {
+		fileName = m.diffFiles[m.diffCursor].name
+	}
+	diffPaneBorder := colorMuted
+	if m.diffFocusRight {
+		diffPaneBorder = colorPrimary
+	}
+	diffPanel := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(diffPaneBorder).
+		Padding(0, 1).
+		Width(diffPaneW).
+		Height(bodyH - 4).
+		Render(lipgloss.NewStyle().Bold(true).Foreground(colorPrimary).Render(fileName) + "\n\n" + diffPaneContent)
+
+	// Merge panels line-by-line
+	fileLines := strings.Split(fileListPanel, "\n")
+	diffLines := strings.Split(diffPanel, "\n")
+	emptyFile := strings.Repeat(" ", lipgloss.Width(fileListPanel))
+	emptyDiff := strings.Repeat(" ", lipgloss.Width(diffPanel))
+	var rows []string
+	for i := 0; i < bodyH; i++ {
+		if i < 2 {
+			rows = append(rows, "")
+			continue
+		}
+		ci := i - 2
+		var fl, dl string
+		if ci < len(fileLines) {
+			fl = fileLines[ci]
+		} else {
+			fl = emptyFile
+		}
+		if ci < len(diffLines) {
+			dl = diffLines[ci]
+		} else {
+			dl = emptyDiff
+		}
+		rows = append(rows, "  "+fl+" "+dl)
+	}
+	return strings.Join(rows, "\n")
 }
 
 func (m TaskModel) View() string {
@@ -481,12 +787,14 @@ func (m TaskModel) View() string {
 
 	phaseBar := renderPhaseBar(m.task.Phase, m.task.SkipResearch, innerW)
 
-	diffStat := m.diffStat
-	var diffLine string
-	if diffStat != "" {
-		diffLine = lipgloss.NewStyle().Foreground(colorSuccess).Render(diffStat)
+	var diffStatLine string
+	if m.diffStat != "" {
+		diffStatLine = lipgloss.NewStyle().Foreground(colorSuccess).Render(m.diffStat)
+		if len(m.diffFiles) > 0 {
+			diffStatLine += "  " + StyleStatusMuted.Render("d to browse")
+		}
 	} else {
-		diffLine = StyleStatusMuted.Render("no changes")
+		diffStatLine = StyleStatusMuted.Render("no changes")
 	}
 
 	cardRows := []string{
@@ -506,7 +814,7 @@ func (m TaskModel) View() string {
 		"",
 		lipgloss.NewStyle().Bold(true).Foreground(colorPrimary).Render("changes"),
 		"",
-		diffLine,
+		diffStatLine,
 		"",
 		divider,
 		"",
@@ -548,7 +856,9 @@ func (m TaskModel) View() string {
 		Render(strings.Join(visibleSlice, "\n"))
 
 	var bodyContent string
-	if m.tmuxOutput != "" {
+	if m.diffOpen {
+		bodyContent = m.renderDiffPanel(w, bodyH, cardW)
+	} else if m.tmuxOutput != "" {
 		// Pad card to fixed height only in side-by-side mode to keep output panel stable.
 		for len(visibleSlice) < visibleLines {
 			visibleSlice = append(visibleSlice, "")
@@ -641,25 +951,42 @@ func (m TaskModel) View() string {
 
 	// ── footer ────────────────────────────────────────────────────────────────
 	var footerParts []string
-	footerParts = append(footerParts, "r launch/resume")
 
-	sessionName := agent.TmuxSessionName(&m.task)
-	if agent.TmuxSessionExists(sessionName) {
-		sessionHint := StyleStatusMuted.Render("inside session: ") +
-			lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render("ctrl+q") +
-			StyleStatusMuted.Render(" detach")
-		footerParts = append(footerParts, sessionHint)
-	}
+	if m.diffOpen {
+		if m.diffFocusRight {
+			footerParts = append(footerParts, "↑/↓ scroll")
+			footerParts = append(footerParts, "← files")
+			footerParts = append(footerParts, "e vim")
+			footerParts = append(footerParts, "esc back")
+		} else {
+			footerParts = append(footerParts, "↑/↓ files")
+			footerParts = append(footerParts, "→ diff")
+			footerParts = append(footerParts, "e vim")
+			footerParts = append(footerParts, "d/esc close")
+		}
+	} else {
+		footerParts = append(footerParts, "r launch/resume")
 
-	if prev := m.task.PrevPhase(); prev != "" {
-		footerParts = append(footerParts, "H → "+phaseLabels[prev])
-	}
-	if next := m.task.NextPhase(); next != "" {
-		footerParts = append(footerParts, "L → "+phaseLabels[next])
-	}
+		sessionName := agent.TmuxSessionName(&m.task)
+		if agent.TmuxSessionExists(sessionName) {
+			sessionHint := StyleStatusMuted.Render("inside session: ") +
+				lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render("ctrl+q") +
+				StyleStatusMuted.Render(" detach")
+			footerParts = append(footerParts, sessionHint)
+		}
 
-	footerParts = append(footerParts, "j/k scroll")
-	footerParts = append(footerParts, "esc back")
+		if prev := m.task.PrevPhase(); prev != "" {
+			footerParts = append(footerParts, "h → "+phaseLabels[prev])
+		}
+		if next := m.task.NextPhase(); next != "" {
+			footerParts = append(footerParts, "l → "+phaseLabels[next])
+		}
+		if len(m.diffFiles) > 0 {
+			footerParts = append(footerParts, "d diff")
+		}
+		footerParts = append(footerParts, "↑/↓ scroll")
+		footerParts = append(footerParts, "esc back")
+	}
 
 	footerHelp := strings.Join(footerParts, "   ")
 	if m.confirm != nil {
