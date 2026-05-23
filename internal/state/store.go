@@ -106,6 +106,16 @@ func (s *State) SetTaskError(taskID, msg string) {
 	}
 }
 
+func (s *State) DeleteTask(taskID string) {
+	var tasks []Task
+	for _, t := range s.Tasks {
+		if t.ID != taskID {
+			tasks = append(tasks, t)
+		}
+	}
+	s.Tasks = tasks
+}
+
 func (s *State) RemoveProject(projectID string) {
 	var projects []Project
 	for _, p := range s.Projects {

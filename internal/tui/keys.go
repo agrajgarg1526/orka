@@ -11,6 +11,7 @@ type BoardKeyMap struct {
 	Retreat key.Binding
 	New     key.Binding
 	Open    key.Binding
+	Delete  key.Binding
 	Search  key.Binding
 	Help    key.Binding
 	Quit    key.Binding
@@ -26,6 +27,7 @@ var BoardKeys = BoardKeyMap{
 	Retreat: key.NewBinding(key.WithKeys("H"), key.WithHelp("H", "retreat phase")),
 	New:     key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new task")),
 	Open:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
+	Delete:  key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete task")),
 	Search:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
 	Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),

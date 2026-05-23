@@ -213,6 +213,31 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
+		case key.Matches(msg, BoardKeys.Delete):
+			if len(tasks) > 0 && m.rowIdx < len(tasks) {
+				t := tasks[m.rowIdx]
+				taskID := t.ID
+				branch := t.Branch
+				projectDir := ""
+				for _, p := range m.st.Projects {
+					if p.ID == m.projectID {
+						projectDir = p.Path
+						break
+					}
+				}
+				m.confirm = &confirmDialog{
+					message: fmt.Sprintf("Delete '%s'? (y/n)", t.Title),
+					onYes: func() {
+						m.st.DeleteTask(taskID)
+						if projectDir != "" && branch != "" {
+							worktree.Remove(projectDir, branch) //nolint:errcheck
+						}
+						if m.rowIdx > 0 {
+							m.rowIdx--
+						}
+					},
+				}
+			}
 		}
 	}
 	return m, nil
@@ -306,11 +331,14 @@ func (m BoardModel) View() string {
 
 	boardHeight := m.boardHeight()
 
-	// Each column gets an equal share of width minus 1px left-border per col (except first)
+	// Each column gets an equal share of width minus 1px left-border per col (except first).
+	// If the terminal is too narrow to fit all columns at min width, show only the active column.
 	numCols := len(boardPhases)
+	const minColWidth = 12
+	narrowMode := w > 0 && (w-(numCols-1))/numCols < minColWidth
 	colWidth := (w - (numCols - 1)) / numCols
-	if colWidth < 18 {
-		colWidth = 18
+	if narrowMode {
+		colWidth = w
 	}
 
 	// Build each column as a fixed-height block.
@@ -320,6 +348,12 @@ func (m BoardModel) View() string {
 	for i, phase := range boardPhases {
 		tasks := m.visibleTasksInCol(phase)
 		isActive := i == m.colIdx
+
+		// In narrow mode only render the active column.
+		if narrowMode && !isActive {
+			cols[i] = ""
+			continue
+		}
 
 		// Header
 		headerFg := lipgloss.Color("#9CA3AF") // muted white
@@ -357,16 +391,20 @@ func (m BoardModel) View() string {
 		}
 
 		// Pad remaining space so all columns are the same height
+		bodyText := strings.Join(rendered, "\n")
+		if narrowMode && len(tasks) == 0 {
+			bodyText = StyleStatusMuted.Render("no tasks here · press l to go to next column")
+		}
 		body := lipgloss.NewStyle().
 			Width(colWidth).
 			Height(boardHeight).
 			Padding(0, 1).
-			Render(strings.Join(rendered, "\n"))
+			Render(bodyText)
 
 		colContent := lipgloss.JoinVertical(lipgloss.Left, hdr, body)
 
 		colStyle := lipgloss.NewStyle().Width(colWidth)
-		if i > 0 {
+		if i > 0 && !narrowMode {
 			// Left border acts as the column divider
 			colStyle = colStyle.
 				BorderLeft(true).
@@ -381,6 +419,7 @@ func (m BoardModel) View() string {
 	if m.showHelp {
 		helpText := "  n        new task\n" +
 			"  enter    open task\n" +
+			"  d        delete task\n" +
 			"  L / H    advance / retreat phase\n" +
 			"  j / k    navigate cards\n" +
 			"  h / l    navigate columns\n" +
@@ -405,7 +444,31 @@ func (m BoardModel) View() string {
 		Render(StyleTitle.Render("orka") + StyleHelp.Render("  agent kanban"))
 
 	// Help bar — always at the bottom, top border
-	helpContent := "n new   L advance   H retreat   enter open   / search   ? help   esc projects   q quit"
+	advanceLabel := ""
+	retreatLabel := ""
+	selectedTasks := m.visibleTasksInCol(boardPhases[m.colIdx])
+	if len(selectedTasks) > 0 && m.rowIdx < len(selectedTasks) {
+		t := selectedTasks[m.rowIdx]
+		if next := t.NextPhase(); next != "" {
+			advanceLabel = "L → " + phaseLabels[next]
+		}
+		if prev := t.PrevPhase(); prev != "" {
+			retreatLabel = "H → " + phaseLabels[prev]
+		}
+	}
+	phaseControls := ""
+	if advanceLabel != "" || retreatLabel != "" {
+		phaseControls = "   " + retreatLabel + "   " + advanceLabel
+	}
+	taskSelected := len(selectedTasks) > 0 && m.rowIdx < len(selectedTasks)
+	taskControls := ""
+	if taskSelected {
+		taskControls = "   enter open   d delete"
+	}
+	helpContent := "n new" + phaseControls + taskControls + "   / search   ? help   esc projects   q quit"
+	if narrowMode {
+		helpContent = fmt.Sprintf("h/l cols  (%d/%d)  ", m.colIdx+1, numCols) + helpContent
+	}
 	if m.searchMode {
 		helpContent = StyleStatusLive.Render("search:") + " " + m.searchQuery + "█"
 	}
@@ -428,11 +491,11 @@ func renderCard(t state.Task, selected bool, width int) string {
 		width = 10
 	}
 	style := StyleCard.Width(width)
-	if selected {
-		style = StyleCardSelected.Width(width)
-	}
 	if t.Error != nil {
 		style = StyleCardError.Width(width)
+	}
+	if selected {
+		style = StyleCardSelected.Width(width)
 	}
 
 	lines := []string{

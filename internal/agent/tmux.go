@@ -31,7 +31,7 @@ func TmuxLaunch(task *state.Task, prompt, dir string) (string, []string) {
 	var agentCmd string
 	switch task.Agent {
 	case "codex":
-		agentCmd = "codex --full-auto " + shellQuote(prompt)
+		agentCmd = "codex --dangerously-bypass-approvals-and-sandbox " + shellQuote(prompt)
 	default:
 		agentCmd = "claude --dangerously-skip-permissions " + shellQuote(prompt)
 	}
@@ -40,7 +40,7 @@ func TmuxLaunch(task *state.Task, prompt, dir string) (string, []string) {
 	// so the user can detach with ctrl+x d (or just ctrl+x ctrl+x).
 	exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-x", "220", "-y", "50",
-		agentCmd,
+		"--", "sh", "-c", agentCmd,
 	).Run() //nolint:errcheck
 	// Disable default prefix and bind ctrl+q to detach — single keypress to return to orka.
 	exec.Command("tmux", "set-option", "-t", name, "prefix", "None").Run()       //nolint:errcheck
@@ -66,7 +66,7 @@ func TmuxResume(task *state.Task, worktreeDir string) (string, []string) {
 			agentCmd = "claude --dangerously-skip-permissions --continue"
 		}
 	}
-	exec.Command("tmux", "new-session", "-d", "-s", name, "-c", worktreeDir, agentCmd).Run() //nolint:errcheck
+	exec.Command("tmux", "new-session", "-d", "-s", name, "-c", worktreeDir, "--", "sh", "-c", agentCmd).Run() //nolint:errcheck
 	exec.Command("tmux", "set-option", "-t", name, "prefix", "None").Run()                   //nolint:errcheck
 	exec.Command("tmux", "bind-key", "-T", "root", "C-q", "detach-client").Run()             //nolint:errcheck
 	return "tmux", []string{"attach-session", "-t", name}

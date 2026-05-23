@@ -72,6 +72,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if found != nil {
 				tm := NewTaskModel(*found, m.st, m.statePath, m.cfg, m.width, m.height)
 				m.task = &tm
+				return m, tm.Init()
 			}
 			return m, nil
 		}

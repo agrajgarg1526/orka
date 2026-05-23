@@ -18,10 +18,8 @@ orka mcp      # start MCP server for agent use
 
 ## Supported agents
 
-- `claude-code` — Claude Code CLI
-- `claude-bedrock` — Claude on AWS Bedrock
-- `codex` — OpenAI Codex CLI
-- `codex-foundry` — Codex on Azure Foundry
+- `claude-code` — Claude Code CLI (uses machine auth automatically)
+- `codex` — OpenAI Codex CLI (uses machine auth automatically)
 
 ## Phases
 

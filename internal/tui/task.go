@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -20,6 +21,7 @@ type AgentDoneMsg struct {
 	TaskID string
 	Err    error
 }
+type tickMsg time.Time
 
 type TaskModel struct {
 	task           state.Task
@@ -30,6 +32,9 @@ type TaskModel struct {
 	editMode       bool
 	notesInput     textinput.Model
 	confirm        *confirmDialog
+	tmuxOutput     string
+	diffStat       string
+	cardScroll     int
 	width          int
 	height         int
 }
@@ -51,7 +56,56 @@ func NewTaskModel(t state.Task, st *state.State, statePath string, cfg *config.C
 	}
 }
 
-func (m TaskModel) Init() tea.Cmd { return nil }
+func (m TaskModel) Init() tea.Cmd {
+	return tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+func captureTmuxPane(sessionName string, maxW int) string {
+	cmd := exec.Command("tmux", "capture-pane", "-t", sessionName, "-p", "-S", "-")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	// Keep last 100 lines — view will trim further to fit
+	if len(lines) > 100 {
+		lines = lines[len(lines)-100:]
+	}
+	// Filter and truncate lines
+	result := make([]string, 0, len(lines))
+	for _, l := range lines {
+		// Skip tmux UI chrome: box-drawing-only lines and the claude status bar lines
+		trimmed := strings.TrimFunc(l, func(r rune) bool {
+			return r == '─' || r == '│' || r == '┼' || r == '└' || r == '┘' ||
+				r == '┌' || r == '┐' || r == ' ' || r == '\t'
+		})
+		if trimmed == "" {
+			result = append(result, "")
+			continue
+		}
+		// Skip the bypass permissions / status bar lines
+		if strings.Contains(l, "bypass permissions") ||
+			strings.Contains(l, "shift+tab to cycle") ||
+			strings.Contains(l, "until auto-compact") {
+			continue
+		}
+		runes := []rune(l)
+		if len(runes) > maxW {
+			runes = runes[:maxW-1]
+			l = string(runes) + "…"
+		}
+		result = append(result, l)
+	}
+	// Trim leading/trailing blank lines from result
+	start, end := 0, len(result)
+	for start < end && result[start] == "" {
+		start++
+	}
+	for end > start && result[end-1] == "" {
+		end--
+	}
+	return strings.Join(result[start:end], "\n")
+}
 
 // isCleanExit returns true for exit codes that mean the user intentionally
 // ended the session (ctrl+c = 130, ctrl+d = 0).
@@ -62,6 +116,24 @@ func isCleanExit(err error) bool {
 	msg := err.Error()
 	return msg == "exit status 130" || msg == "signal: interrupt"
 }
+
+func agentExitError(agent string, err error) string {
+	code := err.Error() // e.g. "exit status 1"
+	switch code {
+	case "exit status 1":
+		switch agent {
+		case "codex":
+			return "codex exited (check auth: codex login)"
+		default:
+			return "agent exited unexpectedly (exit 1)"
+		}
+	case "exit status 2":
+		return agent + ": bad arguments or missing command"
+	default:
+		return agent + " failed: " + code
+	}
+}
+
 
 func isAgentPhase(p state.Phase) bool {
 	switch p {
@@ -103,6 +175,14 @@ func (m TaskModel) launchAgent() (TaskModel, tea.Cmd) {
 	}
 
 	var cmdName string
+	// Clear any stale error whenever the agent is launched or resumed.
+	m.task.Error = nil
+	for i := range m.st.Tasks {
+		if m.st.Tasks[i].ID == m.task.ID {
+			m.st.Tasks[i].Error = nil
+		}
+	}
+
 	var args []string
 	if m.sessionStarted {
 		cmdName, args = agent.TmuxResume(&m.task, dir)
@@ -120,8 +200,8 @@ func (m TaskModel) launchAgent() (TaskModel, tea.Cmd) {
 				m.st.Tasks[i].SessionStarted = true
 			}
 		}
-		_ = m.st.Save(m.statePath)
 	}
+	_ = m.st.Save(m.statePath)
 
 	c := exec.Command(cmdName, args...)
 	c.Dir = dir
@@ -177,24 +257,54 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 
-	case AgentDoneMsg:
-		if msg.Err != nil && !isCleanExit(msg.Err) {
-			errMsg := msg.Err.Error()
-			m.st.SetTaskError(m.task.ID, errMsg)
+	case tickMsg:
+		sessionName := agent.TmuxSessionName(&m.task)
+		if agent.TmuxSessionExists(sessionName) {
+			m.tmuxOutput = captureTmuxPane(sessionName, m.width)
 		} else {
-			next := m.task.NextPhase()
-			if next != "" {
-				m.st.UpdateTaskPhase(m.task.ID, next)
-				m.task.Phase = next
+			m.tmuxOutput = ""
+		}
+		worktreeDir := ""
+		for _, p := range m.st.Projects {
+			if p.ID == m.task.ProjectID {
+				if m.task.Branch != "" {
+					worktreeDir = worktree.WorktreePath(p.Path, m.task.Branch)
+				}
+				break
 			}
 		}
-		_ = m.st.Save(m.statePath)
+		m.diffStat = gitDiffStat(worktreeDir)
+		if worktreeDir != "" {
+			if actual := currentBranch(worktreeDir); actual != "" && actual != m.task.Branch {
+				m.task.Branch = actual
+				for i := range m.st.Tasks {
+					if m.st.Tasks[i].ID == m.task.ID {
+						m.st.Tasks[i].Branch = actual
+					}
+				}
+				_ = m.st.Save(m.statePath)
+			}
+		}
+		return m, tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+
+	case AgentDoneMsg:
+		if msg.Err != nil && !isCleanExit(msg.Err) {
+			errMsg := agentExitError(m.task.Agent, msg.Err)
+			m.st.SetTaskError(m.task.ID, errMsg)
+			_ = m.st.Save(m.statePath)
+		}
 		return m, nil
 
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, TaskKeys.Back):
 			return m, func() tea.Msg { return BackToBoardMsg{} }
+		case key.Matches(msg, TaskKeys.Up):
+			if m.cardScroll > 0 {
+				m.cardScroll--
+			}
+		case key.Matches(msg, TaskKeys.Down):
+			m.cardScroll++
 		case key.Matches(msg, TaskKeys.Edit):
 			m.editMode = true
 			m.notesInput.Focus()
@@ -231,6 +341,17 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// currentBranch returns the current git branch name in dir, or "" on error.
+func currentBranch(dir string) string {
+	cmd := exec.Command("git", "branch", "--show-current")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // gitDiffStat returns a short summary of uncommitted changes in dir, e.g. "3 files  +42 −7".
@@ -339,17 +460,6 @@ func (m TaskModel) View() string {
 	}
 	innerW := cardW - 6 // border(2) + padding(4)
 
-	// resolve worktree dir for git diff
-	worktreeDir := ""
-	for _, p := range m.st.Projects {
-		if p.ID == m.task.ProjectID {
-			if m.task.Branch != "" {
-				worktreeDir = worktree.WorktreePath(p.Path, m.task.Branch)
-			}
-			break
-		}
-	}
-
 	label := lipgloss.NewStyle().Foreground(colorMuted).Width(10)
 	value := lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB"))
 
@@ -371,7 +481,7 @@ func (m TaskModel) View() string {
 
 	phaseBar := renderPhaseBar(m.task.Phase, m.task.SkipResearch, innerW)
 
-	diffStat := gitDiffStat(worktreeDir)
+	diffStat := m.diffStat
 	var diffLine string
 	if diffStat != "" {
 		diffLine = lipgloss.NewStyle().Foreground(colorSuccess).Render(diffStat)
@@ -405,33 +515,153 @@ func (m TaskModel) View() string {
 		descContent,
 	}
 
+	headerH := lipgloss.Height(header)
+	footerH := 3
+	bodyH := h - headerH - footerH
+	// card border(2) + padding top+bottom(2) + margin top(2) = 6
+	visibleLines := bodyH - 6
+	if visibleLines < 3 {
+		visibleLines = 3
+	}
+
+	// Expand all card rows into individual terminal lines for smooth line-by-line scrolling.
+	allLines := strings.Split(lipgloss.JoinVertical(lipgloss.Left, cardRows...), "\n")
+
+	// Allow scrolling until the last content line is visible at the top of the window.
+	maxScroll := len(allLines) - 1
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.cardScroll > maxScroll {
+		m.cardScroll = maxScroll
+	}
+	visibleSlice := allLines[m.cardScroll:]
+	if len(visibleSlice) > visibleLines {
+		visibleSlice = visibleSlice[:visibleLines]
+	}
+
 	card := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colorPrimary).
 		Padding(1, 2).
 		Width(cardW).
-		Render(lipgloss.JoinVertical(lipgloss.Left, cardRows...))
+		Render(strings.Join(visibleSlice, "\n"))
 
-	bodyH := h - lipgloss.Height(header) - 3
-	body := lipgloss.Place(w, bodyH, lipgloss.Center, lipgloss.Top,
-		lipgloss.NewStyle().MarginTop(2).Render(card),
-	)
+	var bodyContent string
+	if m.tmuxOutput != "" {
+		// Pad card to fixed height only in side-by-side mode to keep output panel stable.
+		for len(visibleSlice) < visibleLines {
+			visibleSlice = append(visibleSlice, "")
+		}
+		card = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorPrimary).
+			Padding(1, 2).
+			Width(cardW).
+			Render(strings.Join(visibleSlice, "\n"))
+		// Two independent panels merged line-by-line so scrolling one never affects the other.
+		cardLeft := 2  // left margin
+		cardRight := cardLeft + lipgloss.Width(card)
+		outputLeft := cardRight + 2
+
+		outputW := w - outputLeft - 1
+		if outputW < 20 {
+			outputW = 20
+		}
+
+		// Build output panel lines — cap to inner height: bodyH-4 (panel height) minus header(1)+blank(1) = bodyH-6
+		maxOutputLines := bodyH - 6
+		if maxOutputLines < 1 {
+			maxOutputLines = 1
+		}
+		userStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#C4B5FD")).Bold(true)
+		agentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF"))
+		textW := outputW - 4 // border(2) + padding(2)
+		rawOutputLines := strings.Split(m.tmuxOutput, "\n")
+		if len(rawOutputLines) > maxOutputLines {
+			rawOutputLines = rawOutputLines[len(rawOutputLines)-maxOutputLines:]
+		}
+		var outputRendered []string
+		for _, ol := range rawOutputLines {
+			runes := []rune(ol)
+			if len(runes) > textW {
+				ol = string(runes[:textW-1]) + "…"
+			}
+			trimmed := strings.TrimSpace(ol)
+			if strings.HasPrefix(trimmed, ">") || strings.HasPrefix(trimmed, "❯") {
+				outputRendered = append(outputRendered, userStyle.Render(ol))
+			} else {
+				outputRendered = append(outputRendered, agentStyle.Render(ol))
+			}
+		}
+		panelHeader := lipgloss.NewStyle().Bold(true).Foreground(colorPrimary).Render("agent output")
+		outputPanel := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorMuted).
+			Padding(0, 1).
+			Width(outputW).
+			Height(bodyH - 4). // bodyH - 2 (top margin) - 2 (border top+bottom)
+			Render(panelHeader + "\n\n" + strings.Join(outputRendered, "\n"))
+
+		// Split both panels into lines.
+		cardLines := strings.Split(card, "\n")
+		outputPanelLines := strings.Split(outputPanel, "\n")
+
+		// Merge line-by-line into a canvas of bodyH lines × w cols.
+		emptyCard := strings.Repeat(" ", lipgloss.Width(card))
+		emptyOutput := strings.Repeat(" ", lipgloss.Width(outputPanel))
+		var rows []string
+		for i := 0; i < bodyH; i++ {
+			// 2 lines of top margin before card/output
+			if i < 2 {
+				rows = append(rows, "")
+				continue
+			}
+			ci := i - 2
+			var cl, ol string
+			if ci < len(cardLines) {
+				cl = cardLines[ci]
+			} else {
+				cl = emptyCard
+			}
+			if ci < len(outputPanelLines) {
+				ol = outputPanelLines[ci]
+			} else {
+				ol = emptyOutput
+			}
+			gap := strings.Repeat(" ", cardLeft) + cl + strings.Repeat(" ", 2) + ol
+			rows = append(rows, gap)
+		}
+		bodyContent = strings.Join(rows, "\n")
+	} else {
+		bodyContent = lipgloss.Place(w, bodyH, lipgloss.Center, lipgloss.Top,
+			lipgloss.NewStyle().MarginTop(2).Render(card),
+		)
+	}
 
 	// ── footer ────────────────────────────────────────────────────────────────
-	sessionHint := StyleStatusMuted.Render("inside session: ") + lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render("ctrl+q") + StyleStatusMuted.Render(" detach")
+	var footerParts []string
+	footerParts = append(footerParts, "r launch/resume")
 
-	next := m.task.NextPhase()
-	prev := m.task.PrevPhase()
-	advanceStr := "L advance"
-	retreatStr := "H retreat"
-	if next != "" {
-		advanceStr = "L → " + phaseLabels[next]
-	}
-	if prev != "" {
-		retreatStr = "H → " + phaseLabels[prev]
+	sessionName := agent.TmuxSessionName(&m.task)
+	if agent.TmuxSessionExists(sessionName) {
+		sessionHint := StyleStatusMuted.Render("inside session: ") +
+			lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render("ctrl+q") +
+			StyleStatusMuted.Render(" detach")
+		footerParts = append(footerParts, sessionHint)
 	}
 
-	footerHelp := "r launch/resume   " + sessionHint + "   " + advanceStr + "   " + retreatStr + "   esc back"
+	if prev := m.task.PrevPhase(); prev != "" {
+		footerParts = append(footerParts, "H → "+phaseLabels[prev])
+	}
+	if next := m.task.NextPhase(); next != "" {
+		footerParts = append(footerParts, "L → "+phaseLabels[next])
+	}
+
+	footerParts = append(footerParts, "j/k scroll")
+	footerParts = append(footerParts, "esc back")
+
+	footerHelp := strings.Join(footerParts, "   ")
 	if m.confirm != nil {
 		footerHelp = StyleConfirmPrompt.Render(m.confirm.message)
 	}
@@ -443,5 +673,5 @@ func (m TaskModel) View() string {
 		Padding(0, 1).
 		Render(StyleHelp.Render(footerHelp))
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, bodyContent, footer)
 }

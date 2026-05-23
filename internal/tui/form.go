@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -28,11 +27,11 @@ type FormCancelMsg struct{}
 type formStep int
 
 const (
-	stepTitle        formStep = iota // textinput — enter advances
-	stepBranch                       // textinput — enter advances
-	stepAgent                        // selector  — enter advances
-	stepSkipResearch                 // toggle    — enter advances
-	stepDesc                         // textarea  — enter = newline, ctrl+d advances
+	stepTitle        formStep = iota // textarea(h=1) — enter advances
+	stepBranch                       // textarea(h=1) — enter advances
+	stepAgent                        // selector      — enter advances
+	stepSkipResearch                 // toggle        — enter advances
+	stepDesc                         // textarea      — enter = newline, ctrl+d advances
 	stepCount
 )
 
@@ -56,8 +55,8 @@ const inputBoxMinH = 8
 
 type FormModel struct {
 	step      formStep
-	titleIn   textinput.Model
-	branchIn  textinput.Model
+	titleIn   textarea.Model
+	branchIn  textarea.Model
 	descArea  textarea.Model
 	agentIdx  int
 	pluginIdx int
@@ -95,20 +94,28 @@ func taW(termW int) int {
 	return w
 }
 
+func newSingleLineArea(placeholder string, charLimit int, w, h int) textarea.Model {
+	ta := textarea.New()
+	ta.Placeholder = placeholder
+	ta.CharLimit = charLimit
+	ta.SetWidth(w)
+	ta.SetHeight(h)
+	ta.ShowLineNumbers = false
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	ta.FocusedStyle.Base = lipgloss.NewStyle()
+	ta.BlurredStyle.Base = lipgloss.NewStyle()
+	ta.KeyMap.InsertNewline.SetEnabled(false) // enter must not insert newline
+	return ta
+}
+
 func NewFormModel(w, h int) FormModel {
 	tw := taW(w)
 	ibH := inputBoxH(h)
 
-	ti := textinput.New()
-	ti.Placeholder = "e.g. Fix the SSO login bug"
-	ti.CharLimit = 120
-	ti.Width = tw
+	ti := newSingleLineArea("e.g. Fix the SSO login bug", 300, tw, ibH)
 	ti.Focus()
 
-	bi := textinput.New()
-	bi.Placeholder = "e.g. fix/sso-login-bug"
-	bi.CharLimit = 100
-	bi.Width = tw
+	bi := newSingleLineArea("e.g. fix/sso-login-bug", 100, tw, ibH)
 
 	da := textarea.New()
 	da.Placeholder = "Context, constraints, acceptance criteria…"
@@ -123,12 +130,12 @@ func NewFormModel(w, h int) FormModel {
 	return FormModel{titleIn: ti, branchIn: bi, descArea: da, skipRes: true, width: w, height: h}
 }
 
-func (m FormModel) Init() tea.Cmd { return textinput.Blink }
+func (m FormModel) Init() tea.Cmd { return textarea.Blink }
 
 func (m FormModel) submit() (tea.Model, tea.Cmd) {
 	r := FormResult{
-		Title:        strings.TrimSpace(m.titleIn.Value()),
-		Branch:       strings.TrimSpace(m.branchIn.Value()),
+		Title:        strings.TrimSpace(strings.ReplaceAll(m.titleIn.Value(), "\n", "")),
+		Branch:       strings.TrimSpace(strings.ReplaceAll(m.branchIn.Value(), "\n", "")),
 		Description:  strings.TrimSpace(m.descArea.Value()),
 		Agent:        agentOptions[m.agentIdx],
 		Plugin:       "none",
@@ -145,8 +152,10 @@ func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		tw := taW(m.width)
 		ibH := inputBoxH(m.height)
-		m.titleIn.Width = tw
-		m.branchIn.Width = tw
+		m.titleIn.SetWidth(tw)
+		m.titleIn.SetHeight(ibH)
+		m.branchIn.SetWidth(tw)
+		m.branchIn.SetHeight(ibH)
 		m.descArea.SetWidth(tw)
 		m.descArea.SetHeight(ibH - 2)
 		return m, nil
@@ -158,8 +167,9 @@ func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, func() tea.Msg { return FormCancelMsg{} }
 			}
 			m.step--
-			m = m.syncFocus()
-			return m, nil
+			var focusCmd tea.Cmd
+			m, focusCmd = m.syncFocus()
+			return m, focusCmd
 
 		case "enter":
 			// desc step: enter = newline, fall through to textarea update
@@ -230,23 +240,25 @@ func (m FormModel) advance() (tea.Model, tea.Cmd) {
 		return m.submit()
 	}
 	m.step++
-	m = m.syncFocus()
-	return m, nil
+	var focusCmd tea.Cmd
+	m, focusCmd = m.syncFocus()
+	return m, focusCmd
 }
 
-func (m FormModel) syncFocus() FormModel {
+func (m FormModel) syncFocus() (FormModel, tea.Cmd) {
 	m.titleIn.Blur()
 	m.branchIn.Blur()
 	m.descArea.Blur()
+	var cmd tea.Cmd
 	switch m.step {
 	case stepTitle:
-		m.titleIn.Focus()
+		cmd = m.titleIn.Focus()
 	case stepBranch:
-		m.branchIn.Focus()
+		cmd = m.branchIn.Focus()
 	case stepDesc:
-		m.descArea.Focus()
+		cmd = m.descArea.Focus()
 	}
-	return m
+	return m, cmd
 }
 
 
