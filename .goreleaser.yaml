@@ -34,6 +34,7 @@ brews:
     homepage: https://github.com/agrajgarg1526/orka
     description: Terminal kanban board for orchestrating AI coding agents
     license: MIT
+    skip_upload: true
     install: |
       bin.install "orka"
     test: |

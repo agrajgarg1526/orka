@@ -27,3 +27,63 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION=${TAG#v}
+
+          AMD64_SHA=$(grep "orka_darwin_amd64.tar.gz" dist/checksums.txt | awk '{print $1}')
+          ARM64_SHA=$(grep "orka_darwin_arm64.tar.gz" dist/checksums.txt | awk '{print $1}')
+          LINUX_AMD64_SHA=$(grep "orka_linux_amd64.tar.gz" dist/checksums.txt | awk '{print $1}')
+          LINUX_ARM64_SHA=$(grep "orka_linux_arm64.tar.gz" dist/checksums.txt | awk '{print $1}')
+
+          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/agrajgarg1526/homebrew-orka.git
+
+          cat > homebrew-orka/orka.rb << EOF
+          class Orka < Formula
+            desc "Terminal kanban board for orchestrating AI coding agents"
+            homepage "https://github.com/agrajgarg1526/orka"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_intel do
+                url "https://github.com/agrajgarg1526/orka/releases/download/${TAG}/orka_darwin_amd64.tar.gz"
+                sha256 "${AMD64_SHA}"
+              end
+              on_arm do
+                url "https://github.com/agrajgarg1526/orka/releases/download/${TAG}/orka_darwin_arm64.tar.gz"
+                sha256 "${ARM64_SHA}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/agrajgarg1526/orka/releases/download/${TAG}/orka_linux_amd64.tar.gz"
+                sha256 "${LINUX_AMD64_SHA}"
+              end
+              on_arm do
+                url "https://github.com/agrajgarg1526/orka/releases/download/${TAG}/orka_linux_arm64.tar.gz"
+                sha256 "${LINUX_ARM64_SHA}"
+              end
+            end
+
+            def install
+              bin.install "orka"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/orka --version 2>&1", 1)
+            end
+          end
+          EOF
+
+          cd homebrew-orka
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git add orka.rb
+          git commit -m "orka ${VERSION}"
+          git push
