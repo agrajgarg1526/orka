@@ -11,15 +11,14 @@ A terminal kanban board for orchestrating AI coding agents. Each task gets its o
 ## Install
 
 ```bash
-go install github.com/agrajgarg/orka@latest
+brew tap agrajgarg1526/orka
+brew install agrajgarg1526/orka/orka
 ```
 
-Or build from source:
+Or with Go:
 
 ```bash
-git clone https://github.com/agrajgarg/orka
-cd orka
-go build -o orka .
+go install github.com/agrajgarg/orka@latest
 ```
 
 ## Quick start
