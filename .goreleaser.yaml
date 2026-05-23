@@ -1,0 +1,40 @@
+version: 2
+
+project_name: orka
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+brews:
+  - name: orka
+    repository:
+      owner: agrajgarg1526
+      name: homebrew-orka
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/agrajgarg1526/orka
+    description: Terminal kanban board for orchestrating AI coding agents
+    license: MIT
+    install: |
+      bin.install "orka"
+    test: |
+      system "#{bin}/orka", "--help"
