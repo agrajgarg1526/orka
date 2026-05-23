@@ -10,12 +10,23 @@ A terminal kanban board for orchestrating AI coding agents. Each task gets its o
 
 ## Install
 
+**Homebrew (recommended):**
+
 ```bash
 brew tap agrajgarg1526/orka
 brew install agrajgarg1526/orka/orka
 ```
 
-Or with Go:
+**Manual (macOS arm64 — e.g. macOS 26 beta where Homebrew CLT is unsupported):**
+
+```bash
+curl -L https://github.com/agrajgarg1526/orka/releases/download/v0.1.0/orka_darwin_arm64.tar.gz | tar xz
+sudo mv orka /usr/local/bin/orka
+```
+
+Use `orka_darwin_amd64.tar.gz` for Intel Macs.
+
+**Go:**
 
 ```bash
 go install github.com/agrajgarg/orka@latest
