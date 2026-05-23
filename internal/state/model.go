@@ -33,12 +33,14 @@ type Task struct {
 	ID             string    `json:"id"`
 	ProjectID      string    `json:"project_id"`
 	Title          string    `json:"title"`
+	Description    string    `json:"description"`
 	Phase          Phase     `json:"phase"`
 	Agent          string    `json:"agent"`
 	Plugin         string    `json:"plugin"`
 	Branch         string    `json:"branch"`
 	Notes          string    `json:"notes"`
 	SkipResearch   bool      `json:"skip_research"`
+	SessionStarted bool      `json:"session_started"`
 	CreatedAt      time.Time `json:"created_at"`
 	PhaseStartedAt time.Time `json:"phase_started_at"`
 	Error          *string   `json:"error"`

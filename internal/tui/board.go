@@ -3,16 +3,17 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/agrajgarg/orka/internal/state"
+	"github.com/agrajgarg/orka/internal/worktree"
 )
 
 type OpenTaskMsg struct{ TaskID string }
 type StateChangedMsg struct{}
+type BackToProjectsMsg struct{}
 
 type BoardModel struct {
 	st          *state.State
@@ -20,6 +21,7 @@ type BoardModel struct {
 	statePath   string
 	colIdx      int
 	rowIdx      int
+	colScroll   map[int]int // scroll offset (in cards) per column index
 	showForm    bool
 	form        FormModel
 	searchMode  bool
@@ -31,8 +33,9 @@ type BoardModel struct {
 }
 
 type confirmDialog struct {
-	message string
-	onYes   func()
+	message        string
+	onYes          func()
+	startOnConfirm bool // task view: start agent after confirm
 }
 
 var boardPhases = []state.Phase{
@@ -58,21 +61,47 @@ func NewBoardModel(st *state.State, projectID, statePath string) BoardModel {
 		st:        st,
 		projectID: projectID,
 		statePath: statePath,
+		colScroll: make(map[int]int),
 	}
 }
 
 func (m BoardModel) Init() tea.Cmd { return nil }
 
 func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle form result messages emitted as commands by the form
+	// Always capture window size so both board and form know the terminal dimensions.
+	if sz, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = sz.Width
+		m.height = sz.Height
+	}
+
+	// Handle form result messages emitted as commands by the form.
 	switch msg := msg.(type) {
 	case FormSubmitMsg:
+		var warmupCmd tea.Cmd
 		if msg.Result.Title != "" {
-			m.st.AddTask(m.projectID, msg.Result.Title, msg.Result.Agent, msg.Result.Plugin, msg.Result.SkipResearch)
+			m.st.AddTask(m.projectID, msg.Result.Title, msg.Result.Description, msg.Result.Branch, msg.Result.Agent, msg.Result.Plugin, msg.Result.SkipResearch)
 			_ = m.st.Save(m.statePath)
+			// Pre-create the worktree in the background so it's ready when the user presses r.
+			if msg.Result.Branch != "" {
+				projectDir := ""
+				for _, p := range m.st.Projects {
+					if p.ID == m.projectID {
+						projectDir = p.Path
+						break
+					}
+				}
+				if projectDir != "" {
+					branch := msg.Result.Branch
+					dir := projectDir
+					warmupCmd = func() tea.Msg {
+						worktree.Setup(dir, branch) //nolint:errcheck
+						return nil
+					}
+				}
+			}
 		}
 		m.showForm = false
-		return m, nil
+		return m, warmupCmd
 	case FormCancelMsg:
 		m.showForm = false
 		return m, nil
@@ -117,19 +146,17 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		return m, nil
 	case tea.KeyMsg:
 		tasks := m.visibleTasksInCol(boardPhases[m.colIdx])
 		switch {
 		case key.Matches(msg, BoardKeys.Quit):
 			return m, tea.Quit
+		case key.Matches(msg, BoardKeys.Back):
+			return m, func() tea.Msg { return BackToProjectsMsg{} }
 		case key.Matches(msg, BoardKeys.Help):
 			m.showHelp = !m.showHelp
 		case key.Matches(msg, BoardKeys.New):
-			m.form = NewFormModel()
+			m.form = NewFormModel(m.width, m.height)
 			m.showForm = true
 		case key.Matches(msg, BoardKeys.Search):
 			m.searchMode = true
@@ -147,10 +174,12 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, BoardKeys.Up):
 			if m.rowIdx > 0 {
 				m.rowIdx--
+				m.clampScroll()
 			}
 		case key.Matches(msg, BoardKeys.Down):
 			if m.rowIdx < len(tasks)-1 {
 				m.rowIdx++
+				m.clampScroll()
 			}
 		case key.Matches(msg, BoardKeys.Open):
 			if len(tasks) > 0 && m.rowIdx < len(tasks) {
@@ -189,6 +218,63 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// boardHeight returns the available card rows for the current terminal height.
+func (m BoardModel) boardHeight() int {
+	h := m.height
+	if h == 0 {
+		h = 30
+	}
+	bh := h - 5
+	if bh < 4 {
+		bh = 4
+	}
+	return bh
+}
+
+// clampScroll ensures colScroll[colIdx] keeps m.rowIdx visible.
+func (m *BoardModel) clampScroll() {
+	if m.colScroll == nil {
+		m.colScroll = make(map[int]int)
+	}
+	tasks := m.visibleTasksInCol(boardPhases[m.colIdx])
+	bh := m.boardHeight()
+
+	// Compute the line-offset of each card so we know which rows are visible.
+	lineOf := make([]int, len(tasks))
+	line := 0
+	for i, t := range tasks {
+		lineOf[i] = line
+		card := renderCard(t, false, 20) // width doesn't matter for line count
+		line += strings.Count(card, "\n") + 1
+	}
+
+	scroll := m.colScroll[m.colIdx]
+
+	if m.rowIdx >= len(tasks) {
+		return
+	}
+
+	cardTop := lineOf[m.rowIdx]
+	cardH := 1
+	if m.rowIdx+1 < len(tasks) {
+		cardH = lineOf[m.rowIdx+1] - cardTop
+	}
+	cardBot := cardTop + cardH - 1
+
+	// Scroll down if card bottom is below the visible window.
+	if cardBot >= scroll+bh {
+		scroll = cardBot - bh + 1
+	}
+	// Scroll up if card top is above the visible window.
+	if cardTop < scroll {
+		scroll = cardTop
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+	m.colScroll[m.colIdx] = scroll
+}
+
 func (m BoardModel) visibleTasksInCol(phase state.Phase) []state.Task {
 	tasks := m.st.TasksByPhase(m.projectID, phase)
 	if m.searchQuery == "" {
@@ -215,15 +301,10 @@ func (m BoardModel) View() string {
 	}
 
 	if m.showForm {
-		return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, m.form.View())
+		return m.form.View()
 	}
 
-	// Layout: 1 app header + 1 header border + 1 col-header row + 1 help-border + 1 help row = 5 fixed rows
-	// The remaining rows are for cards.
-	boardHeight := h - 5
-	if boardHeight < 4 {
-		boardHeight = 4
-	}
+	boardHeight := m.boardHeight()
 
 	// Each column gets an equal share of width minus 1px left-border per col (except first)
 	numCols := len(boardPhases)
@@ -252,20 +333,27 @@ func (m BoardModel) View() string {
 			Padding(0, 1).
 			Render(fmt.Sprintf("%s (%d)", phaseLabels[phase], len(tasks)))
 
-		// Cards — render up to boardHeight lines worth
+		// Cards — render within the scroll window.
+		scroll := m.colScroll[i]
 		var rendered []string
-		usedRows := 0
+		linesSeen := 0
+		linesRendered := 0
 		for j, t := range tasks {
-			if usedRows >= boardHeight {
-				break
-			}
 			card := renderCard(t, isActive && j == m.rowIdx, colWidth-4)
-			h := strings.Count(card, "\n") + 1
-			if usedRows+h > boardHeight {
+			cardH := strings.Count(card, "\n") + 1
+			cardEnd := linesSeen + cardH
+			// Skip cards entirely above the scroll offset.
+			if cardEnd <= scroll {
+				linesSeen = cardEnd
+				continue
+			}
+			// Stop if we've filled the visible area.
+			if linesRendered >= boardHeight {
 				break
 			}
 			rendered = append(rendered, card)
-			usedRows += h
+			linesRendered += cardH
+			linesSeen = cardEnd
 		}
 
 		// Pad remaining space so all columns are the same height
@@ -317,7 +405,7 @@ func (m BoardModel) View() string {
 		Render(StyleTitle.Render("orka") + StyleHelp.Render("  agent kanban"))
 
 	// Help bar — always at the bottom, top border
-	helpContent := "n new   L advance   H retreat   enter open   / search   ? help   q quit"
+	helpContent := "n new   L advance   H retreat   enter open   / search   ? help   esc projects   q quit"
 	if m.searchMode {
 		helpContent = StyleStatusLive.Render("search:") + " " + m.searchQuery + "█"
 	}
@@ -347,26 +435,22 @@ func renderCard(t state.Task, selected bool, width int) string {
 		style = StyleCardError.Width(width)
 	}
 
-	elapsed := time.Since(t.PhaseStartedAt).Round(time.Minute).String()
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F9FAFB")).Width(width).Render(t.Title),
+	}
 
-	statusLine := StyleStatusMuted.Render(elapsed)
 	if t.Error != nil {
 		msg := *t.Error
-		if len(msg) > 20 {
-			msg = msg[:20] + "…"
+		if len(msg) > width-2 {
+			msg = msg[:width-3] + "…"
 		}
-		statusLine = StyleStatusError.Render("✗ " + msg)
+		lines = append(lines, StyleStatusError.Render("✗ "+msg))
+	} else {
+		lines = append(lines, StyleStatusMuted.Render(t.Agent))
+		if t.Branch != "" {
+			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Render("⎇ "+t.Branch))
+		}
 	}
 
-	title := t.Title
-	if len(title) > width-2 {
-		title = title[:width-3] + "…"
-	}
-
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		title,
-		StyleStatusMuted.Render(t.Agent),
-		statusLine,
-	)
-	return style.Render(content)
+	return style.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }

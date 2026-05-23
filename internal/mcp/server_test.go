@@ -10,7 +10,7 @@ import (
 func TestListTasksReturnsAllTasks(t *testing.T) {
 	st := state.New()
 	p := st.AddProject("test", "/tmp/test")
-	st.AddTask(p.ID, "Fix bug", "claude-code", "none", false)
+	st.AddTask(p.ID, "Fix bug", "", "task/fix-bug", "claude-code", "none", false)
 
 	tasks := st.Tasks
 	if len(tasks) != 1 {
@@ -28,7 +28,7 @@ func TestListTasksReturnsAllTasks(t *testing.T) {
 func TestCompletePhaseAdvancesTask(t *testing.T) {
 	st := state.New()
 	p := st.AddProject("test", "/tmp/test")
-	task := st.AddTask(p.ID, "Fix bug", "claude-code", "none", false)
+	task := st.AddTask(p.ID, "Fix bug", "", "task/fix-bug", "claude-code", "none", false)
 	taskID := task.ID
 
 	for i := range st.Tasks {

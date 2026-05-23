@@ -57,12 +57,14 @@ func (s *State) AddProject(name, path string) *Project {
 	return &s.Projects[len(s.Projects)-1]
 }
 
-func (s *State) AddTask(projectID, title, agent, plugin string, skipResearch bool) *Task {
+func (s *State) AddTask(projectID, title, description, branch, agent, plugin string, skipResearch bool) *Task {
 	now := time.Now()
 	t := Task{
 		ID:             uuid.NewString(),
 		ProjectID:      projectID,
 		Title:          title,
+		Description:    description,
+		Branch:         branch,
 		Phase:          PhaseToBePicked,
 		Agent:          agent,
 		Plugin:         plugin,
@@ -102,6 +104,24 @@ func (s *State) SetTaskError(taskID, msg string) {
 			return
 		}
 	}
+}
+
+func (s *State) RemoveProject(projectID string) {
+	var projects []Project
+	for _, p := range s.Projects {
+		if p.ID != projectID {
+			projects = append(projects, p)
+		}
+	}
+	s.Projects = projects
+	// also remove all tasks belonging to this project
+	var tasks []Task
+	for _, t := range s.Tasks {
+		if t.ProjectID != projectID {
+			tasks = append(tasks, t)
+		}
+	}
+	s.Tasks = tasks
 }
 
 func DefaultStatePath() string {

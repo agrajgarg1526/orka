@@ -21,7 +21,7 @@ var newCmd = &cobra.Command{
 			return fmt.Errorf("load state: %w", err)
 		}
 
-		_ = ensureProject(st, cwd, statePath)
+		_ = addProjectIfMissing(st, cwd, statePath)
 
 		mcpPath := filepath.Join(cwd, ".mcp.json")
 		if _, err := os.Stat(mcpPath); os.IsNotExist(err) {
@@ -43,6 +43,18 @@ var newCmd = &cobra.Command{
 		fmt.Printf("orka initialized for project at %s\n", cwd)
 		return nil
 	},
+}
+
+func addProjectIfMissing(st *state.State, path, statePath string) string {
+	for _, p := range st.Projects {
+		if p.Path == path {
+			return p.ID
+		}
+	}
+	name := filepath.Base(path)
+	p := st.AddProject(name, path)
+	_ = st.Save(statePath)
+	return p.ID
 }
 
 func init() {

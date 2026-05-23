@@ -21,12 +21,14 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("load state: %w", err)
 		}
 
-		cwd, _ := os.Getwd()
-		projectID := ensureProject(st, cwd, statePath)
+		cfgPath := config.DefaultConfigPath()
+		_ = config.WriteDefaultPrompts(cfgPath)
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			cfg = config.Default()
+		}
 
-		_ = config.WriteDefaultPrompts(config.DefaultConfigPath())
-
-		model := tui.NewBoardModel(st, projectID, statePath)
+		model := tui.NewAppModel(st, statePath, cfg, 0, 0)
 		p := tea.NewProgram(model, tea.WithAltScreen())
 		if _, err := p.Run(); err != nil {
 			return fmt.Errorf("TUI error: %w", err)
@@ -35,23 +37,6 @@ var rootCmd = &cobra.Command{
 	},
 }
 
-func ensureProject(st *state.State, path, statePath string) string {
-	for _, p := range st.Projects {
-		if p.Path == path {
-			return p.ID
-		}
-	}
-	name := path
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' || path[i] == '\\' {
-			name = path[i+1:]
-			break
-		}
-	}
-	p := st.AddProject(name, path)
-	_ = st.Save(statePath)
-	return p.ID
-}
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {

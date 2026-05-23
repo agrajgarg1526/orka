@@ -1,19 +1,24 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
+// ── types ─────────────────────────────────────────────────────────────────────
+
 type FormResult struct {
 	Title        string
+	Description  string
+	Branch       string
 	Agent        string
 	Plugin       string
 	SkipResearch bool
-	Notes        string
 	Cancelled    bool
 }
 
@@ -23,74 +28,127 @@ type FormCancelMsg struct{}
 type formStep int
 
 const (
-	stepTitle formStep = iota
-	stepAgent
-	stepPlugin
-	stepSkipResearch
-	stepNotes
+	stepTitle        formStep = iota // textinput — enter advances
+	stepBranch                       // textinput — enter advances
+	stepAgent                        // selector  — enter advances
+	stepSkipResearch                 // toggle    — enter advances
+	stepDesc                         // textarea  — enter = newline, ctrl+d advances
 	stepCount
 )
 
-var stepTitles = []string{
-	"What's the task?",
-	"Which agent?",
-	"Use a plugin?",
-	"Skip research phase?",
-	"Any notes? (optional)",
+var agentOptions = []string{"claude-code", "codex"}
+
+
+var stepQuestion = []string{
+	"What's the task title?",
+	"Branch name for this task?",
+	"Which agent should run it?",
+	"Skip the research phase?",
+	"Describe the task  (enter → newline  ·  ctrl+d → create task)",
 }
 
-var agentOptions = []string{"claude-code", "claude-bedrock", "codex", "codex-foundry"}
-var pluginOptions = []string{"none", "superpowers", "gsd", "custom"}
+var stepLabel = []string{"Title", "Branch", "Agent", "Research", "Description"}
+
+const formChrome = 10 // fixed lines of chrome above/below the input box
+const inputBoxMinH = 8
+
+// ── model ─────────────────────────────────────────────────────────────────────
 
 type FormModel struct {
-	step       formStep
-	titleInput textinput.Model
-	notesInput textinput.Model
-	agentIdx   int
-	pluginIdx  int
-	skipRes    bool
-	width      int
-	height     int
+	step      formStep
+	titleIn   textinput.Model
+	branchIn  textinput.Model
+	descArea  textarea.Model
+	agentIdx  int
+	pluginIdx int
+	skipRes   bool
+	width     int
+	height    int
 }
 
-func NewFormModel() FormModel {
-	ti := textinput.New()
-	ti.Placeholder = "e.g. Fix auth bug"
-	ti.Focus()
-	ti.CharLimit = 80
-	ti.Width = 36
-
-	ni := textinput.New()
-	ni.Placeholder = "press enter to skip"
-	ni.CharLimit = 200
-	ni.Width = 36
-
-	return FormModel{
-		titleInput: ti,
-		notesInput: ni,
+// formBoxInnerW is the content width inside the outer box — capped at 90, matches View().
+func formBoxInnerW(termW int) int {
+	w := termW - 8 // border(2) + padding(6)
+	if w > 90 {
+		w = 90
 	}
+	if w < 40 {
+		w = 40
+	}
+	return w
 }
 
-func (m FormModel) Init() tea.Cmd {
-	return textinput.Blink
+func inputBoxH(termH int) int {
+	h := termH - 6 - formChrome
+	if h < inputBoxMinH {
+		h = inputBoxMinH
+	}
+	return h
 }
+
+// taW returns the textarea content width: biW minus input-box border(2)+padding(4).
+func taW(termW int) int {
+	w := formBoxInnerW(termW) - 6
+	if w < 10 {
+		w = 10
+	}
+	return w
+}
+
+func NewFormModel(w, h int) FormModel {
+	tw := taW(w)
+	ibH := inputBoxH(h)
+
+	ti := textinput.New()
+	ti.Placeholder = "e.g. Fix the SSO login bug"
+	ti.CharLimit = 120
+	ti.Width = tw
+	ti.Focus()
+
+	bi := textinput.New()
+	bi.Placeholder = "e.g. fix/sso-login-bug"
+	bi.CharLimit = 100
+	bi.Width = tw
+
+	da := textarea.New()
+	da.Placeholder = "Context, constraints, acceptance criteria…"
+	da.CharLimit = 4000
+	da.SetWidth(tw)
+	da.SetHeight(ibH - 2)
+	da.ShowLineNumbers = false
+	da.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	da.FocusedStyle.Base = lipgloss.NewStyle()
+	da.BlurredStyle.Base = lipgloss.NewStyle()
+
+	return FormModel{titleIn: ti, branchIn: bi, descArea: da, skipRes: true, width: w, height: h}
+}
+
+func (m FormModel) Init() tea.Cmd { return textinput.Blink }
 
 func (m FormModel) submit() (tea.Model, tea.Cmd) {
-	result := FormResult{
-		Title:        m.titleInput.Value(),
+	r := FormResult{
+		Title:        strings.TrimSpace(m.titleIn.Value()),
+		Branch:       strings.TrimSpace(m.branchIn.Value()),
+		Description:  strings.TrimSpace(m.descArea.Value()),
 		Agent:        agentOptions[m.agentIdx],
-		Plugin:       pluginOptions[m.pluginIdx],
+		Plugin:       "none",
 		SkipResearch: m.skipRes,
-		Notes:        m.notesInput.Value(),
 	}
-	return m, func() tea.Msg { return FormSubmitMsg{Result: result} }
+	return m, func() tea.Msg { return FormSubmitMsg{Result: r} }
 }
+
+// ── update ────────────────────────────────────────────────────────────────────
 
 func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
+		m.width, m.height = msg.Width, msg.Height
+		tw := taW(m.width)
+		ibH := inputBoxH(m.height)
+		m.titleIn.Width = tw
+		m.branchIn.Width = tw
+		m.descArea.SetWidth(tw)
+		m.descArea.SetHeight(ibH - 2)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -104,37 +162,47 @@ func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "enter":
-			if m.step == stepTitle && m.titleInput.Value() == "" {
-				return m, nil // require a title
+			// desc step: enter = newline, fall through to textarea update
+			if m.step == stepDesc {
+				break
 			}
-			if m.step == formStep(stepCount-1) {
-				return m.submit()
+			if m.step == stepTitle && strings.TrimSpace(m.titleIn.Value()) == "" {
+				return m, nil
 			}
-			m.step++
-			m = m.syncFocus()
-			return m, nil
+			if m.step == stepBranch && strings.TrimSpace(m.branchIn.Value()) == "" {
+				return m, nil
+			}
+			return m.advance()
+
+		case "ctrl+d":
+			// advance / submit from any step (primary key for desc step)
+			if m.step == stepTitle && strings.TrimSpace(m.titleIn.Value()) == "" {
+				return m, nil
+			}
+			if m.step == stepBranch && strings.TrimSpace(m.branchIn.Value()) == "" {
+				return m, nil
+			}
+			return m.advance()
 
 		case "left", "up":
 			switch m.step {
 			case stepAgent:
 				m.agentIdx = (m.agentIdx - 1 + len(agentOptions)) % len(agentOptions)
-			case stepPlugin:
-				m.pluginIdx = (m.pluginIdx - 1 + len(pluginOptions)) % len(pluginOptions)
+				return m, nil
 			case stepSkipResearch:
 				m.skipRes = !m.skipRes
+				return m, nil
 			}
-			return m, nil
 
 		case "right", "down":
 			switch m.step {
 			case stepAgent:
 				m.agentIdx = (m.agentIdx + 1) % len(agentOptions)
-			case stepPlugin:
-				m.pluginIdx = (m.pluginIdx + 1) % len(pluginOptions)
+				return m, nil
 			case stepSkipResearch:
 				m.skipRes = !m.skipRes
+				return m, nil
 			}
-			return m, nil
 
 		case " ":
 			if m.step == stepSkipResearch {
@@ -147,24 +215,42 @@ func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch m.step {
 	case stepTitle:
-		m.titleInput, cmd = m.titleInput.Update(msg)
-	case stepNotes:
-		m.notesInput, cmd = m.notesInput.Update(msg)
+		m.titleIn, cmd = m.titleIn.Update(msg)
+	case stepBranch:
+		m.branchIn, cmd = m.branchIn.Update(msg)
+	case stepDesc:
+		m.descArea, cmd = m.descArea.Update(msg)
 	}
 	return m, cmd
 }
 
+
+func (m FormModel) advance() (tea.Model, tea.Cmd) {
+	if m.step == formStep(stepCount-1) {
+		return m.submit()
+	}
+	m.step++
+	m = m.syncFocus()
+	return m, nil
+}
+
 func (m FormModel) syncFocus() FormModel {
-	m.titleInput.Blur()
-	m.notesInput.Blur()
+	m.titleIn.Blur()
+	m.branchIn.Blur()
+	m.descArea.Blur()
 	switch m.step {
 	case stepTitle:
-		m.titleInput.Focus()
-	case stepNotes:
-		m.notesInput.Focus()
+		m.titleIn.Focus()
+	case stepBranch:
+		m.branchIn.Focus()
+	case stepDesc:
+		m.descArea.Focus()
 	}
 	return m
 }
+
+
+// ── view ──────────────────────────────────────────────────────────────────────
 
 func (m FormModel) View() string {
 	w := m.width
@@ -176,111 +262,184 @@ func (m FormModel) View() string {
 		h = 24
 	}
 
-	innerW := 44
+	biW := formBoxInnerW(w)
+	ibH := inputBoxH(h)
 
-	// Progress bar: filled blocks for done, current, empty for ahead
-	progressBar := ""
-	for i := formStep(0); i < stepCount; i++ {
-		var seg string
-		switch {
-		case i < m.step:
-			seg = lipgloss.NewStyle().Foreground(colorSuccess).Render("██")
-		case i == m.step:
-			seg = lipgloss.NewStyle().Foreground(colorPrimary).Render("██")
-		default:
-			seg = lipgloss.NewStyle().Foreground(lipgloss.Color("#2D2D2D")).Render("██")
-		}
-		progressBar += seg
-		if i < stepCount-1 {
-			progressBar += " "
-		}
+	// ── Row 1: "New Task" title + step counter + breadcrumb ───────────────────
+	titlePart := lipgloss.NewStyle().Bold(true).Foreground(colorPrimary).Render("New Task")
+	counterPart := lipgloss.NewStyle().Foreground(colorMuted).
+		Render(fmt.Sprintf("  step %d of %d  ", int(m.step)+1, int(stepCount)))
+	crumbPart := renderCrumbs(m.step)
+
+	gap := biW - visLen(titlePart) - visLen(counterPart) - visLen(crumbPart) - 2
+	if gap < 1 {
+		gap = 1
 	}
+	divLine := lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Repeat("─", gap))
+	headerRow := titlePart + counterPart + divLine + "  " + crumbPart
 
-	// Step question — large, prominent
+	// ── Row 2: full-width separator ───────────────────────────────────────────
+	sep := lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Repeat("─", biW))
+
+	// ── Row 3: progress dots ──────────────────────────────────────────────────
+	progress := renderProgress(m.step, biW)
+
+	// ── Row 4: question ───────────────────────────────────────────────────────
 	question := lipgloss.NewStyle().
 		Bold(true).
-		Width(innerW).
 		Foreground(lipgloss.Color("#F9FAFB")).
-		Render(stepTitles[m.step])
+		Width(biW).
+		Render(stepQuestion[m.step])
 
-	// Input area
-	var inputArea string
-	var hint string
+	// ── Row 5: input box (fixed height) ───────────────────────────────────────
+	inputContent := m.buildInputContent(biW, ibH)
+	inputBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorPrimary).
+		Padding(0, 1).
+		Width(biW - 2).
+		Height(ibH).
+		Render(inputContent)
 
-	switch m.step {
-	case stepTitle:
-		inputArea = lipgloss.NewStyle().
-			Width(innerW).
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(colorPrimary).
-			Render("  " + m.titleInput.View())
-		hint = "enter to continue   esc to cancel"
-
-	case stepAgent:
-		inputArea = renderSelector(agentOptions, m.agentIdx, innerW)
-		hint = "↑/↓ to move   enter to select"
-
-	case stepPlugin:
-		inputArea = renderSelector(pluginOptions, m.pluginIdx, innerW)
-		hint = "↑/↓ to move   enter to select"
-
-	case stepSkipResearch:
-		inputArea = renderYesNo(m.skipRes, innerW)
-		hint = "←/→ or space to toggle   enter to confirm"
-
-	case stepNotes:
-		inputArea = lipgloss.NewStyle().
-			Width(innerW).
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(colorPrimary).
-			Render("  " + m.notesInput.View())
-		hint = "enter to create   esc to go back"
-	}
-
-	// Summary of confirmed steps shown as small pills above the question
-	var pills []string
-	if m.step > stepTitle {
-		pills = append(pills, pill(m.titleInput.Value()))
-	}
-	if m.step > stepAgent {
-		pills = append(pills, pill(agentOptions[m.agentIdx]))
-	}
-	if m.step > stepPlugin {
-		pills = append(pills, pill(pluginOptions[m.pluginIdx]))
-	}
-	if m.step > stepSkipResearch {
-		if m.skipRes {
-			pills = append(pills, pill("skip research"))
-		} else {
-			pills = append(pills, pill("with research"))
-		}
-	}
-
-	pillRow := ""
-	if len(pills) > 0 {
-		pillRow = strings.Join(pills, " ") + "\n\n"
-	}
+	// ── Row 6: button bar ─────────────────────────────────────────────────────
+	buttons := renderButtons(m.step, biW)
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
-		progressBar,
+		headerRow,
+		sep,
 		"",
-		pillRow+question,
+		progress,
 		"",
-		inputArea,
+		question,
 		"",
+		inputBox,
 		"",
-		StyleHelp.Render(hint),
+		buttons,
 	)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colorPrimary).
 		Padding(1, 3).
-		Width(innerW+8)
+		Width(biW + 8) // +2 border +6 padding
 
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box.Render(content))
+}
+
+func (m FormModel) buildInputContent(biW, ibH int) string {
+	// inside the input box: box border(2) + padding(2 each side=4) = 6
+	contentW := biW - 6
+
+	var raw string
+	switch m.step {
+	case stepTitle:
+		raw = m.titleIn.View()
+	case stepBranch:
+		raw = m.branchIn.View()
+	case stepAgent:
+		raw = renderSelector(agentOptions, m.agentIdx, contentW)
+	case stepSkipResearch:
+		raw = "\n" + renderYesNo(m.skipRes, contentW)
+	case stepDesc:
+		raw = m.descArea.View()
+	}
+
+	lines := strings.Split(raw, "\n")
+	for len(lines) < ibH {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderButtons(current formStep, innerW int) string {
+	dimStyle := lipgloss.NewStyle().
+		Foreground(colorMuted).
+		Padding(0, 1)
+	activeStyle := lipgloss.NewStyle().
+		Foreground(colorPrimary).
+		Bold(true).
+		Padding(0, 1)
+	keyStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#555555")).
+		Background(lipgloss.Color("#1E1E2E")).
+		Padding(0, 1)
+
+	// Back / Cancel
+	var backLabel string
+	if current == stepTitle {
+		backLabel = "cancel"
+	} else {
+		backLabel = "← back"
+	}
+	backBtn := dimStyle.Render(backLabel) + " " + keyStyle.Render("esc")
+
+	// Next / Create
+	var nextLabel, nextKey string
+	if current == formStep(stepCount-1) {
+		nextLabel = "✓ create task"
+		nextKey = "ctrl+d"
+	} else if current == stepDesc {
+		nextLabel = "next →"
+		nextKey = "ctrl+d"
+	} else {
+		nextLabel = "next →"
+		nextKey = "enter"
+	}
+	nextBtn := activeStyle.Render(nextLabel) + " " + keyStyle.Render(nextKey)
+
+	// separator
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("#2D2D2D")).
+		Render(strings.Repeat("─", innerW))
+
+	pad := innerW - visLen(backBtn) - visLen(nextBtn) - 2
+	if pad < 1 {
+		pad = 1
+	}
+	btnRow := backBtn + strings.Repeat(" ", pad) + nextBtn
+	return sep + "\n" + btnRow
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func renderProgress(current formStep, width int) string {
+	var segs []string
+	for i := formStep(0); i < stepCount; i++ {
+		var dot string
+		switch {
+		case i < current:
+			dot = lipgloss.NewStyle().Foreground(colorSuccess).Render("●")
+		case i == current:
+			dot = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render("◉")
+		default:
+			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("#3D3D3D")).Render("○")
+		}
+		segs = append(segs, dot)
+	}
+	bar := strings.Join(segs, "  ")
+	pct := lipgloss.NewStyle().Foreground(colorMuted).
+		Render(fmt.Sprintf("step %d of %d", int(current)+1, int(stepCount)))
+	pad := width - visLen(bar) - visLen(pct)
+	if pad < 1 {
+		pad = 1
+	}
+	return bar + strings.Repeat(" ", pad) + pct
+}
+
+func renderCrumbs(current formStep) string {
+	sep := lipgloss.NewStyle().Foreground(colorMuted).Render(" › ")
+	var parts []string
+	for i, lbl := range stepLabel {
+		switch {
+		case formStep(i) < current:
+			parts = append(parts, lipgloss.NewStyle().Foreground(colorSuccess).Render(lbl))
+		case formStep(i) == current:
+			parts = append(parts, lipgloss.NewStyle().Bold(true).
+				Foreground(lipgloss.Color("#F9FAFB")).Render(lbl))
+		default:
+			parts = append(parts, lipgloss.NewStyle().Foreground(colorMuted).Render(lbl))
+		}
+	}
+	return strings.Join(parts, sep)
 }
 
 func renderSelector(options []string, selected int, width int) string {
@@ -288,23 +447,20 @@ func renderSelector(options []string, selected int, width int) string {
 	for i, opt := range options {
 		if i == selected {
 			rows = append(rows, lipgloss.NewStyle().
-				Foreground(colorPrimary).
-				Bold(true).
-				Width(width).
-				Render("  ▸ "+opt))
+				Foreground(colorPrimary).Bold(true).Width(width).
+				Render("  ▶  "+opt))
 		} else {
 			rows = append(rows, lipgloss.NewStyle().
-				Foreground(colorMuted).
-				Width(width).
-				Render("    "+opt))
+				Foreground(colorMuted).Width(width).
+				Render("     "+opt))
 		}
 	}
 	return strings.Join(rows, "\n")
 }
 
-func renderYesNo(skipRes bool, width int) string {
-	yes := lipgloss.NewStyle().Padding(0, 2)
-	no := lipgloss.NewStyle().Padding(0, 2)
+func renderYesNo(skipRes bool, _ int) string {
+	yes := lipgloss.NewStyle().Padding(0, 3)
+	no := lipgloss.NewStyle().Padding(0, 3)
 	if skipRes {
 		yes = yes.Background(colorPrimary).Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
 		no = no.Foreground(colorMuted)
@@ -312,18 +468,30 @@ func renderYesNo(skipRes bool, width int) string {
 		no = no.Background(colorPrimary).Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
 		yes = yes.Foreground(colorMuted)
 	}
-	_ = width
 	return lipgloss.JoinHorizontal(lipgloss.Top,
 		yes.Render("Yes, skip"),
-		lipgloss.NewStyle().Foreground(colorMuted).Render("  "),
+		lipgloss.NewStyle().Foreground(colorMuted).Render("    "),
 		no.Render("No, include"),
 	)
 }
 
-func pill(s string) string {
-	return lipgloss.NewStyle().
-		Background(lipgloss.Color("#1E1E2E")).
-		Foreground(colorSuccess).
-		Padding(0, 1).
-		Render("✓ " + s)
+func visLen(s string) int { return len(stripANSI(s)) }
+
+func stripANSI(s string) string {
+	out := make([]byte, 0, len(s))
+	esc := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\x1b' {
+			esc = true
+			continue
+		}
+		if esc {
+			if s[i] == 'm' {
+				esc = false
+			}
+			continue
+		}
+		out = append(out, s[i])
+	}
+	return string(out)
 }

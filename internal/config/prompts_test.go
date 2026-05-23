@@ -12,9 +12,9 @@ import (
 func TestResolvePromptSuperpowersPreset(t *testing.T) {
 	cfg := config.Default()
 	task := &state.Task{
-		Title:  "Fix auth bug",
-		Notes:  "Check token validation",
-		Plugin: "superpowers",
+		Title:       "Fix auth bug",
+		Description: "Check token validation",
+		Plugin:      "superpowers",
 	}
 	got := cfg.ResolvePrompt(task, state.PhaseRunning)
 	want := "/implement Fix auth bug\nCheck token validation"

@@ -13,7 +13,7 @@ func TestLoadSaveRoundtrip(t *testing.T) {
 
 	s := state.New()
 	p := s.AddProject("my-app", "/projects/my-app")
-	task := s.AddTask(p.ID, "Fix auth bug", "claude-code", "superpowers", false)
+	task := s.AddTask(p.ID, "Fix auth bug", "", "task/fix-auth-bug", "claude-code", "superpowers", false)
 
 	if err := s.Save(path); err != nil {
 		t.Fatalf("save: %v", err)

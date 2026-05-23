@@ -14,6 +14,7 @@ type BoardKeyMap struct {
 	Search  key.Binding
 	Help    key.Binding
 	Quit    key.Binding
+	Back    key.Binding
 }
 
 var BoardKeys = BoardKeyMap{
@@ -28,6 +29,7 @@ var BoardKeys = BoardKeyMap{
 	Search:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
 	Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+	Back:    key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "projects")),
 }
 
 type TaskKeyMap struct {
