@@ -6,14 +6,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agrajgarg/orka/internal/agent"
+	"github.com/agrajgarg/orka/internal/config"
+	githubpr "github.com/agrajgarg/orka/internal/github"
+	"github.com/agrajgarg/orka/internal/state"
+	"github.com/agrajgarg/orka/internal/worktree"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/agrajgarg/orka/internal/agent"
-	"github.com/agrajgarg/orka/internal/config"
-	"github.com/agrajgarg/orka/internal/state"
-	"github.com/agrajgarg/orka/internal/worktree"
 )
 
 type BackToBoardMsg struct{}
@@ -145,7 +146,6 @@ func agentExitError(agent string, err error) string {
 	}
 }
 
-
 func isAgentPhase(p state.Phase) bool {
 	switch p {
 	case state.PhaseResearch, state.PhasePlanning, state.PhaseRunning, state.PhaseReview:
@@ -158,13 +158,7 @@ func isAgentPhase(p state.Phase) bool {
 // On first launch it sends the task prompt; on resume it continues the last session.
 // Returns the (possibly mutated) model and the tea.Cmd to execute.
 func (m TaskModel) launchAgent() (TaskModel, tea.Cmd) {
-	projectDir := ""
-	for _, p := range m.st.Projects {
-		if p.ID == m.task.ProjectID {
-			projectDir = p.Path
-			break
-		}
-	}
+	projectDir := m.projectDir()
 
 	dir := projectDir
 	if projectDir != "" && m.task.Branch != "" {
@@ -222,6 +216,36 @@ func (m TaskModel) launchAgent() (TaskModel, tea.Cmd) {
 	})
 }
 
+func (m TaskModel) projectDir() string {
+	for _, p := range m.st.Projects {
+		if p.ID == m.task.ProjectID {
+			return p.Path
+		}
+	}
+	return ""
+}
+
+func (m *TaskModel) syncPR(finalize bool) {
+	projectDir := m.projectDir()
+	if projectDir == "" {
+		return
+	}
+	url, err := githubpr.EnsureTaskPR(projectDir, &m.task, finalize)
+	if err != nil {
+		m.st.SetTaskError(m.task.ID, err.Error())
+		return
+	}
+	if url == "" {
+		return
+	}
+	m.task.PRURL = url
+	for i := range m.st.Tasks {
+		if m.st.Tasks[i].ID == m.task.ID {
+			m.st.Tasks[i].PRURL = url
+		}
+	}
+}
+
 func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.confirm != nil {
 		if k, ok := msg.(tea.KeyMsg); ok {
@@ -230,6 +254,11 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				startAgent := m.confirm.startOnConfirm
 				doReset := m.confirm.resetSession
 				m.confirm.onYes()
+				if m.confirm.afterYes != nil {
+					if err := m.confirm.afterYes(); err != nil {
+						m.st.SetTaskError(m.task.ID, err.Error())
+					}
+				}
 				m.confirm = nil
 				if doReset {
 					m.sessionStarted = false
@@ -321,8 +350,10 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil && !isCleanExit(msg.Err) {
 			errMsg := agentExitError(m.task.Agent, msg.Err)
 			m.st.SetTaskError(m.task.ID, errMsg)
-			_ = m.st.Save(m.statePath)
+		} else {
+			m.syncPR(m.task.Phase == state.PhaseDone)
 		}
+		_ = m.st.Save(m.statePath)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -418,6 +449,12 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.st.UpdateTaskPhase(m.task.ID, nextPhase)
 						m.task.Phase = nextPhase
 					},
+					afterYes: func() error {
+						if nextPhase == state.PhaseDone {
+							m.syncPR(true)
+						}
+						return nil
+					},
 					resetSession: true,
 				}
 			}
@@ -448,6 +485,23 @@ func currentBranch(dir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func boolLabel(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
+}
+
+func taskPRBaseLabel(task state.Task) string {
+	if task.PRBaseBranch == "" {
+		return "disabled"
+	}
+	if task.PRURL != "" {
+		return task.PRBaseBranch + "  " + task.PRURL
+	}
+	return task.PRBaseBranch
 }
 
 // gitShortStat returns a one-line summary like "3 files changed, 42 insertions(+), 7 deletions(-)".
@@ -807,6 +861,8 @@ func (m TaskModel) View() string {
 		label.Render("branch") + value.Render(m.task.Branch),
 		label.Render("agent") + value.Render(m.task.Agent),
 		label.Render("plugin") + value.Render(m.task.Plugin),
+		label.Render("auto run") + value.Render(boolLabel(m.task.AutoRun)),
+		label.Render("pr base") + value.Render(taskPRBaseLabel(m.task)),
 		label.Render("created") + value.Render(m.task.CreatedAt.Format("2006-01-02 15:04")),
 		label.Render("status") + statusStr,
 		"",
@@ -870,7 +926,7 @@ func (m TaskModel) View() string {
 			Width(cardW).
 			Render(strings.Join(visibleSlice, "\n"))
 		// Two independent panels merged line-by-line so scrolling one never affects the other.
-		cardLeft := 2  // left margin
+		cardLeft := 2 // left margin
 		cardRight := cardLeft + lipgloss.Width(card)
 		outputLeft := cardRight + 2
 

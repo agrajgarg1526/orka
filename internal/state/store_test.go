@@ -13,7 +13,7 @@ func TestLoadSaveRoundtrip(t *testing.T) {
 
 	s := state.New()
 	p := s.AddProject("my-app", "/projects/my-app")
-	task := s.AddTask(p.ID, "Fix auth bug", "", "task/fix-auth-bug", "claude-code", "superpowers", false)
+	task := s.AddTask(p.ID, "Fix auth bug", "", "task/fix-auth-bug", "claude-code", "superpowers", false, true, "master")
 
 	if err := s.Save(path); err != nil {
 		t.Fatalf("save: %v", err)
@@ -32,6 +32,12 @@ func TestLoadSaveRoundtrip(t *testing.T) {
 	}
 	if s2.Tasks[0].Phase != state.PhaseToBePicked {
 		t.Errorf("expected ToBePicked phase, got %q", s2.Tasks[0].Phase)
+	}
+	if !s2.Tasks[0].AutoRun {
+		t.Errorf("expected auto_run to round-trip")
+	}
+	if s2.Tasks[0].PRBaseBranch != "master" {
+		t.Errorf("expected pr_base_branch to round-trip, got %q", s2.Tasks[0].PRBaseBranch)
 	}
 }
 

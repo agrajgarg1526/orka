@@ -57,7 +57,7 @@ func (s *State) AddProject(name, path string) *Project {
 	return &s.Projects[len(s.Projects)-1]
 }
 
-func (s *State) AddTask(projectID, title, description, branch, agent, plugin string, skipResearch bool) *Task {
+func (s *State) AddTask(projectID, title, description, branch, agent, plugin string, skipResearch, autoRun bool, prBaseBranch string) *Task {
 	now := time.Now()
 	t := Task{
 		ID:             uuid.NewString(),
@@ -68,6 +68,8 @@ func (s *State) AddTask(projectID, title, description, branch, agent, plugin str
 		Phase:          PhaseToBePicked,
 		Agent:          agent,
 		Plugin:         plugin,
+		AutoRun:        autoRun,
+		PRBaseBranch:   prBaseBranch,
 		SkipResearch:   skipResearch,
 		CreatedAt:      now,
 		PhaseStartedAt: now,
