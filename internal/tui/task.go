@@ -131,6 +131,9 @@ func isCleanExit(err error) bool {
 
 func agentExitError(agent string, err error) string {
 	code := err.Error() // e.g. "exit status 1"
+	if strings.Contains(code, "resume manually with:") {
+		return code
+	}
 	switch code {
 	case "exit status 1":
 		switch agent {
@@ -190,7 +193,13 @@ func (m TaskModel) launchAgent() (TaskModel, tea.Cmd) {
 
 	var args []string
 	if m.sessionStarted {
-		cmdName, args = agent.TmuxResume(&m.task, dir)
+		var err error
+		cmdName, args, err = agent.TmuxResume(&m.task, dir)
+		if err != nil {
+			return m, func() tea.Msg {
+				return AgentDoneMsg{TaskID: m.task.ID, Err: err}
+			}
+		}
 	} else {
 		phase := m.task.Phase
 		if !isAgentPhase(phase) {
@@ -263,9 +272,11 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if doReset {
 					m.sessionStarted = false
 					m.task.SessionStarted = false
+					m.task.AgentSessionID = ""
 					for i := range m.st.Tasks {
 						if m.st.Tasks[i].ID == m.task.ID {
 							m.st.Tasks[i].SessionStarted = false
+							m.st.Tasks[i].AgentSessionID = ""
 						}
 					}
 				}
@@ -347,6 +358,24 @@ func (m TaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
 
 	case AgentDoneMsg:
+		worktreeDir := ""
+		if projectDir := m.projectDir(); projectDir != "" {
+			if m.task.Branch != "" {
+				worktreeDir = worktree.WorktreePath(projectDir, m.task.Branch)
+			} else {
+				worktreeDir = projectDir
+			}
+		}
+		if worktreeDir != "" {
+			if id := agent.LatestSessionID(m.task.Agent, worktreeDir); id != "" {
+				m.task.AgentSessionID = id
+				for i := range m.st.Tasks {
+					if m.st.Tasks[i].ID == m.task.ID {
+						m.st.Tasks[i].AgentSessionID = id
+					}
+				}
+			}
+		}
 		if msg.Err != nil && !isCleanExit(msg.Err) {
 			errMsg := agentExitError(m.task.Agent, msg.Err)
 			m.st.SetTaskError(m.task.ID, errMsg)
