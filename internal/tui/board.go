@@ -4,14 +4,18 @@ import (
 	"fmt"
 	"strings"
 
+	githubpr "github.com/agrajgarg/orka/internal/github"
+	"github.com/agrajgarg/orka/internal/state"
+	"github.com/agrajgarg/orka/internal/worktree"
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/agrajgarg/orka/internal/state"
-	"github.com/agrajgarg/orka/internal/worktree"
 )
 
-type OpenTaskMsg struct{ TaskID string }
+type OpenTaskMsg struct {
+	TaskID     string
+	AutoLaunch bool
+}
 type StateChangedMsg struct{}
 type BackToProjectsMsg struct{}
 
@@ -35,6 +39,8 @@ type BoardModel struct {
 type confirmDialog struct {
 	message        string
 	onYes          func()
+	afterYes       func() error
+	errorTaskID    string
 	startOnConfirm bool // task view: start agent after confirm
 	resetSession   bool // task view: clear sessionStarted after confirm
 }
@@ -78,9 +84,19 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle form result messages emitted as commands by the form.
 	switch msg := msg.(type) {
 	case FormSubmitMsg:
-		var warmupCmd tea.Cmd
+		var cmds []tea.Cmd
 		if msg.Result.Title != "" {
-			m.st.AddTask(m.projectID, msg.Result.Title, msg.Result.Description, msg.Result.Branch, msg.Result.Agent, msg.Result.Plugin, msg.Result.SkipResearch)
+			task := m.st.AddTask(
+				m.projectID,
+				msg.Result.Title,
+				msg.Result.Description,
+				msg.Result.Branch,
+				msg.Result.Agent,
+				msg.Result.Plugin,
+				msg.Result.SkipResearch,
+				msg.Result.AutoRun,
+				msg.Result.PRBaseBranch,
+			)
 			_ = m.st.Save(m.statePath)
 			// Pre-create the worktree in the background so it's ready when the user presses r.
 			if msg.Result.Branch != "" {
@@ -93,16 +109,21 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if projectDir != "" {
 					branch := msg.Result.Branch
+					baseBranch := msg.Result.PRBaseBranch
 					dir := projectDir
-					warmupCmd = func() tea.Msg {
-						worktree.Setup(dir, branch) //nolint:errcheck
+					cmds = append(cmds, func() tea.Msg {
+						worktree.SetupFromBase(dir, branch, baseBranch) //nolint:errcheck
 						return nil
-					}
+					})
 				}
+			}
+			if msg.Result.AutoRun {
+				taskID := task.ID
+				cmds = append(cmds, func() tea.Msg { return OpenTaskMsg{TaskID: taskID, AutoLaunch: true} })
 			}
 		}
 		m.showForm = false
-		return m, warmupCmd
+		return m, tea.Batch(cmds...)
 	case FormCancelMsg:
 		m.showForm = false
 		return m, nil
@@ -119,6 +140,13 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch k.String() {
 			case "y", "Y":
 				m.confirm.onYes()
+				if m.confirm.afterYes != nil {
+					if err := m.confirm.afterYes(); err != nil {
+						if m.confirm.errorTaskID != "" {
+							m.st.SetTaskError(m.confirm.errorTaskID, err.Error())
+						}
+					}
+				}
 				m.confirm = nil
 				_ = m.st.Save(m.statePath)
 			case "n", "N", "esc":
@@ -192,10 +220,36 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				next := t.NextPhase()
 				if next != "" {
 					taskID := t.ID
+					projectDir := ""
+					for _, p := range m.st.Projects {
+						if p.ID == m.projectID {
+							projectDir = p.Path
+							break
+						}
+					}
+					taskCopy := t
 					m.confirm = &confirmDialog{
 						message: fmt.Sprintf("Advance '%s' to %s? (y/n)", t.Title, phaseLabels[next]),
 						onYes: func() {
 							m.st.UpdateTaskPhase(taskID, next)
+						},
+						errorTaskID: taskID,
+						afterYes: func() error {
+							if next != state.PhaseDone || projectDir == "" {
+								return nil
+							}
+							url, err := githubpr.EnsureTaskPR(projectDir, &taskCopy, true)
+							if err != nil {
+								return err
+							}
+							if url != "" {
+								for i := range m.st.Tasks {
+									if m.st.Tasks[i].ID == taskID {
+										m.st.Tasks[i].PRURL = url
+									}
+								}
+							}
+							return nil
 						},
 					}
 				}

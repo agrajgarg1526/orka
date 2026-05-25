@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
 
@@ -49,27 +50,31 @@ func TmuxLaunch(task *state.Task, prompt, dir string) (string, []string) {
 }
 
 // TmuxResume attaches to an existing session or creates a new one with resume command.
-func TmuxResume(task *state.Task, worktreeDir string) (string, []string) {
+func TmuxResume(task *state.Task, worktreeDir string) (string, []string, error) {
 	name := TmuxSessionName(task)
 	if TmuxSessionExists(name) {
-		return "tmux", []string{"attach-session", "-t", name}
+		return "tmux", []string{"attach-session", "-t", name}, nil
 	}
 	// Session gone — start a fresh resume session
 	var agentCmd string
 	switch task.Agent {
 	case "codex":
-		agentCmd = "codex --continue"
-	default:
-		if id := latestClaudeSessionID(worktreeDir); id != "" {
-			agentCmd = "claude --dangerously-skip-permissions --resume " + id
-		} else {
-			agentCmd = "claude --dangerously-skip-permissions --continue"
+		id, ok := ResolveSessionID(task, worktreeDir)
+		if !ok {
+			return "", nil, fmt.Errorf("no saved %s session found; resume manually with: %s", task.Agent, ManualResumeCommand(task, worktreeDir))
 		}
+		agentCmd = "codex resume " + shellQuote(id)
+	default:
+		id, ok := ResolveSessionID(task, worktreeDir)
+		if !ok {
+			return "", nil, fmt.Errorf("no saved %s session found; resume manually with: %s", task.Agent, ManualResumeCommand(task, worktreeDir))
+		}
+		agentCmd = "claude --dangerously-skip-permissions --resume " + shellQuote(id)
 	}
 	exec.Command("tmux", "new-session", "-d", "-s", name, "-c", worktreeDir, "--", "sh", "-c", agentCmd).Run() //nolint:errcheck
-	exec.Command("tmux", "set-option", "-t", name, "prefix", "None").Run()                   //nolint:errcheck
-	exec.Command("tmux", "bind-key", "-T", "root", "C-q", "detach-client").Run()             //nolint:errcheck
-	return "tmux", []string{"attach-session", "-t", name}
+	exec.Command("tmux", "set-option", "-t", name, "prefix", "None").Run()                                     //nolint:errcheck
+	exec.Command("tmux", "bind-key", "-T", "root", "C-q", "detach-client").Run()                               //nolint:errcheck
+	return "tmux", []string{"attach-session", "-t", name}, nil
 }
 
 func shellQuote(s string) string {

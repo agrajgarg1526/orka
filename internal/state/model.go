@@ -38,9 +38,13 @@ type Task struct {
 	Agent          string    `json:"agent"`
 	Plugin         string    `json:"plugin"`
 	Branch         string    `json:"branch"`
+	AutoRun        bool      `json:"auto_run"`
+	PRBaseBranch   string    `json:"pr_base_branch"`
+	PRURL          string    `json:"pr_url"`
 	Notes          string    `json:"notes"`
 	SkipResearch   bool      `json:"skip_research"`
 	SessionStarted bool      `json:"session_started"`
+	AgentSessionID string    `json:"agent_session_id"`
 	CreatedAt      time.Time `json:"created_at"`
 	PhaseStartedAt time.Time `json:"phase_started_at"`
 	Error          *string   `json:"error"`

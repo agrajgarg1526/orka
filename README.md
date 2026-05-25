@@ -40,7 +40,7 @@ orka new        # register project + write .mcp.json
 orka            # open the kanban board
 ```
 
-Press `n` to create your first task, fill in the title, branch, and agent, then press `r` on the task to launch the agent.
+Press `n` to create your first task, fill in the title, branch, agent, and configuration, then press `r` on the task to launch the agent.
 
 ## How it works
 
@@ -63,7 +63,7 @@ To Be Picked → Research → Planning → Running → Review → Done
 - **Review** — agent reviews its own changes
 - **Done** — complete
 
-Research is optional — skip it per task at creation time with the "skip research" toggle.
+Research is optional — configure it per task in the `Configuration` step.
 
 ## Creating a task
 
@@ -74,8 +74,15 @@ Press `n` on the board to open the task wizard. Steps:
 | Title | Short name shown on the card |
 | Branch | Git branch — a worktree is created at `.worktrees/<branch>` |
 | Agent | `claude-code` or `codex` |
-| Skip research | Jump straight to Planning |
+| Configuration | Skip research, auto-run the task after creation, and optionally raise a PR against a base branch (default `master`) |
 | Description | Full brief sent in the agent prompt |
+
+If PR automation is configured, orka will try to:
+
+- push the task branch to `origin`
+- create a PR titled `[WIP] <task title>` once the branch has commits ahead of the configured base branch
+- assign the PR to the current GitHub user when possible
+- remove the `[WIP]` prefix when the task reaches `Done`
 
 ## Board keys
 

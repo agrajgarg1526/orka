@@ -9,8 +9,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// ── types ─────────────────────────────────────────────────────────────────────
-
 type FormResult struct {
 	Title        string
 	Description  string
@@ -18,6 +16,8 @@ type FormResult struct {
 	Agent        string
 	Plugin       string
 	SkipResearch bool
+	AutoRun      bool
+	PRBaseBranch string
 	Cancelled    bool
 }
 
@@ -27,47 +27,55 @@ type FormCancelMsg struct{}
 type formStep int
 
 const (
-	stepTitle        formStep = iota // textarea(h=1) — enter advances
-	stepBranch                       // textarea(h=1) — enter advances
-	stepAgent                        // selector      — enter advances
-	stepSkipResearch                 // toggle        — enter advances
-	stepDesc                         // textarea      — enter = newline, ctrl+d advances
+	stepTitle formStep = iota
+	stepBranch
+	stepAgent
+	stepConfig
+	stepDesc
 	stepCount
 )
 
-var agentOptions = []string{"claude-code", "codex"}
+type configField int
 
+const (
+	configSkipResearch configField = iota
+	configAutoRun
+	configPRBaseBranch
+	configFieldCount
+)
+
+var agentOptions = []string{"claude-code", "codex"}
 
 var stepQuestion = []string{
 	"What's the task title?",
 	"Branch name for this task?",
 	"Which agent should run it?",
-	"Skip the research phase?",
+	"Configuration",
 	"Describe the task  (enter → newline  ·  ctrl+d → create task)",
 }
 
-var stepLabel = []string{"Title", "Branch", "Agent", "Research", "Description"}
+var stepLabel = []string{"Title", "Branch", "Agent", "Configuration", "Description"}
 
-const formChrome = 10 // fixed lines of chrome above/below the input box
+const formChrome = 10
 const inputBoxMinH = 8
-
-// ── model ─────────────────────────────────────────────────────────────────────
 
 type FormModel struct {
 	step      formStep
 	titleIn   textarea.Model
 	branchIn  textarea.Model
+	prBaseIn  textarea.Model
 	descArea  textarea.Model
 	agentIdx  int
 	pluginIdx int
+	configIdx configField
 	skipRes   bool
+	autoRun   bool
 	width     int
 	height    int
 }
 
-// formBoxInnerW is the content width inside the outer box — capped at 90, matches View().
 func formBoxInnerW(termW int) int {
-	w := termW - 8 // border(2) + padding(6)
+	w := termW - 8
 	if w > 90 {
 		w = 90
 	}
@@ -85,7 +93,6 @@ func inputBoxH(termH int) int {
 	return h
 }
 
-// taW returns the textarea content width: biW minus input-box border(2)+padding(4).
 func taW(termW int) int {
 	w := formBoxInnerW(termW) - 6
 	if w < 10 {
@@ -104,7 +111,7 @@ func newSingleLineArea(placeholder string, charLimit int, w, h int) textarea.Mod
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.FocusedStyle.Base = lipgloss.NewStyle()
 	ta.BlurredStyle.Base = lipgloss.NewStyle()
-	ta.KeyMap.InsertNewline.SetEnabled(false) // enter must not insert newline
+	ta.KeyMap.InsertNewline.SetEnabled(false)
 	return ta
 }
 
@@ -116,6 +123,8 @@ func NewFormModel(w, h int) FormModel {
 	ti.Focus()
 
 	bi := newSingleLineArea("e.g. fix/sso-login-bug", 100, tw, ibH)
+	pi := newSingleLineArea("master", 100, tw-4, 1)
+	pi.SetValue("master")
 
 	da := textarea.New()
 	da.Placeholder = "Context, constraints, acceptance criteria…"
@@ -127,7 +136,15 @@ func NewFormModel(w, h int) FormModel {
 	da.FocusedStyle.Base = lipgloss.NewStyle()
 	da.BlurredStyle.Base = lipgloss.NewStyle()
 
-	return FormModel{titleIn: ti, branchIn: bi, descArea: da, skipRes: true, width: w, height: h}
+	return FormModel{
+		titleIn:  ti,
+		branchIn: bi,
+		prBaseIn: pi,
+		descArea: da,
+		skipRes:  true,
+		width:    w,
+		height:   h,
+	}
 }
 
 func (m FormModel) Init() tea.Cmd { return textarea.Blink }
@@ -140,11 +157,11 @@ func (m FormModel) submit() (tea.Model, tea.Cmd) {
 		Agent:        agentOptions[m.agentIdx],
 		Plugin:       "none",
 		SkipResearch: m.skipRes,
+		AutoRun:      m.autoRun,
+		PRBaseBranch: strings.TrimSpace(strings.ReplaceAll(m.prBaseIn.Value(), "\n", "")),
 	}
 	return m, func() tea.Msg { return FormSubmitMsg{Result: r} }
 }
-
-// ── update ────────────────────────────────────────────────────────────────────
 
 func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -156,6 +173,7 @@ func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.titleIn.SetHeight(ibH)
 		m.branchIn.SetWidth(tw)
 		m.branchIn.SetHeight(ibH)
+		m.prBaseIn.SetWidth(tw - 4)
 		m.descArea.SetWidth(tw)
 		m.descArea.SetHeight(ibH - 2)
 		return m, nil
@@ -167,12 +185,9 @@ func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, func() tea.Msg { return FormCancelMsg{} }
 			}
 			m.step--
-			var focusCmd tea.Cmd
-			m, focusCmd = m.syncFocus()
-			return m, focusCmd
+			return m.syncFocus()
 
 		case "enter":
-			// desc step: enter = newline, fall through to textarea update
 			if m.step == stepDesc {
 				break
 			}
@@ -185,7 +200,6 @@ func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.advance()
 
 		case "ctrl+d":
-			// advance / submit from any step (primary key for desc step)
 			if m.step == stepTitle && strings.TrimSpace(m.titleIn.Value()) == "" {
 				return m, nil
 			}
@@ -194,29 +208,40 @@ func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.advance()
 
-		case "left", "up":
+		case "up":
 			switch m.step {
 			case stepAgent:
 				m.agentIdx = (m.agentIdx - 1 + len(agentOptions)) % len(agentOptions)
 				return m, nil
-			case stepSkipResearch:
-				m.skipRes = !m.skipRes
+			case stepConfig:
+				if m.configIdx > 0 {
+					m.configIdx--
+					return m.syncConfigFocus()
+				}
 				return m, nil
 			}
 
-		case "right", "down":
+		case "down":
 			switch m.step {
 			case stepAgent:
 				m.agentIdx = (m.agentIdx + 1) % len(agentOptions)
 				return m, nil
-			case stepSkipResearch:
-				m.skipRes = !m.skipRes
+			case stepConfig:
+				if m.configIdx < configFieldCount-1 {
+					m.configIdx++
+					return m.syncConfigFocus()
+				}
 				return m, nil
 			}
 
-		case " ":
-			if m.step == stepSkipResearch {
-				m.skipRes = !m.skipRes
+		case "left", "right", " ":
+			if m.step == stepConfig {
+				switch m.configIdx {
+				case configSkipResearch:
+					m.skipRes = !m.skipRes
+				case configAutoRun:
+					m.autoRun = !m.autoRun
+				}
 				return m, nil
 			}
 		}
@@ -228,41 +253,50 @@ func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.titleIn, cmd = m.titleIn.Update(msg)
 	case stepBranch:
 		m.branchIn, cmd = m.branchIn.Update(msg)
+	case stepConfig:
+		if m.configIdx == configPRBaseBranch {
+			m.prBaseIn, cmd = m.prBaseIn.Update(msg)
+		}
 	case stepDesc:
 		m.descArea, cmd = m.descArea.Update(msg)
 	}
 	return m, cmd
 }
 
-
 func (m FormModel) advance() (tea.Model, tea.Cmd) {
 	if m.step == formStep(stepCount-1) {
 		return m.submit()
 	}
 	m.step++
-	var focusCmd tea.Cmd
-	m, focusCmd = m.syncFocus()
-	return m, focusCmd
+	return m.syncFocus()
 }
 
 func (m FormModel) syncFocus() (FormModel, tea.Cmd) {
 	m.titleIn.Blur()
 	m.branchIn.Blur()
+	m.prBaseIn.Blur()
 	m.descArea.Blur()
-	var cmd tea.Cmd
 	switch m.step {
 	case stepTitle:
-		cmd = m.titleIn.Focus()
+		return m, m.titleIn.Focus()
 	case stepBranch:
-		cmd = m.branchIn.Focus()
+		return m, m.branchIn.Focus()
+	case stepConfig:
+		return m.syncConfigFocus()
 	case stepDesc:
-		cmd = m.descArea.Focus()
+		return m, m.descArea.Focus()
+	default:
+		return m, nil
 	}
-	return m, cmd
 }
 
-
-// ── view ──────────────────────────────────────────────────────────────────────
+func (m FormModel) syncConfigFocus() (FormModel, tea.Cmd) {
+	m.prBaseIn.Blur()
+	if m.step == stepConfig && m.configIdx == configPRBaseBranch {
+		return m, m.prBaseIn.Focus()
+	}
+	return m, nil
+}
 
 func (m FormModel) View() string {
 	w := m.width
@@ -277,7 +311,6 @@ func (m FormModel) View() string {
 	biW := formBoxInnerW(w)
 	ibH := inputBoxH(h)
 
-	// ── Row 1: "New Task" title + step counter + breadcrumb ───────────────────
 	titlePart := lipgloss.NewStyle().Bold(true).Foreground(colorPrimary).Render("New Task")
 	counterPart := lipgloss.NewStyle().Foreground(colorMuted).
 		Render(fmt.Sprintf("  step %d of %d  ", int(m.step)+1, int(stepCount)))
@@ -290,20 +323,14 @@ func (m FormModel) View() string {
 	divLine := lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Repeat("─", gap))
 	headerRow := titlePart + counterPart + divLine + "  " + crumbPart
 
-	// ── Row 2: full-width separator ───────────────────────────────────────────
 	sep := lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Repeat("─", biW))
-
-	// ── Row 3: progress dots ──────────────────────────────────────────────────
 	progress := renderProgress(m.step, biW)
-
-	// ── Row 4: question ───────────────────────────────────────────────────────
 	question := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("#F9FAFB")).
 		Width(biW).
 		Render(stepQuestion[m.step])
 
-	// ── Row 5: input box (fixed height) ───────────────────────────────────────
 	inputContent := m.buildInputContent(biW, ibH)
 	inputBox := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -313,7 +340,6 @@ func (m FormModel) View() string {
 		Height(ibH).
 		Render(inputContent)
 
-	// ── Row 6: button bar ─────────────────────────────────────────────────────
 	buttons := renderButtons(m.step, biW)
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
@@ -333,13 +359,12 @@ func (m FormModel) View() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colorPrimary).
 		Padding(1, 3).
-		Width(biW + 8) // +2 border +6 padding
+		Width(biW + 8)
 
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box.Render(content))
 }
 
 func (m FormModel) buildInputContent(biW, ibH int) string {
-	// inside the input box: box border(2) + padding(2 each side=4) = 6
 	contentW := biW - 6
 
 	var raw string
@@ -350,8 +375,8 @@ func (m FormModel) buildInputContent(biW, ibH int) string {
 		raw = m.branchIn.View()
 	case stepAgent:
 		raw = renderSelector(agentOptions, m.agentIdx, contentW)
-	case stepSkipResearch:
-		raw = "\n" + renderYesNo(m.skipRes, contentW)
+	case stepConfig:
+		raw = renderConfigStep(m, contentW, ibH)
 	case stepDesc:
 		raw = m.descArea.View()
 	}
@@ -376,30 +401,22 @@ func renderButtons(current formStep, innerW int) string {
 		Background(lipgloss.Color("#1E1E2E")).
 		Padding(0, 1)
 
-	// Back / Cancel
-	var backLabel string
+	backLabel := "← back"
 	if current == stepTitle {
 		backLabel = "cancel"
-	} else {
-		backLabel = "← back"
 	}
 	backBtn := dimStyle.Render(backLabel) + " " + keyStyle.Render("esc")
 
-	// Next / Create
-	var nextLabel, nextKey string
+	nextLabel := "next →"
+	nextKey := "enter"
 	if current == formStep(stepCount-1) {
 		nextLabel = "✓ create task"
 		nextKey = "ctrl+d"
 	} else if current == stepDesc {
-		nextLabel = "next →"
 		nextKey = "ctrl+d"
-	} else {
-		nextLabel = "next →"
-		nextKey = "enter"
 	}
 	nextBtn := activeStyle.Render(nextLabel) + " " + keyStyle.Render(nextKey)
 
-	// separator
 	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("#2D2D2D")).
 		Render(strings.Repeat("─", innerW))
 
@@ -410,8 +427,6 @@ func renderButtons(current formStep, innerW int) string {
 	btnRow := backBtn + strings.Repeat(" ", pad) + nextBtn
 	return sep + "\n" + btnRow
 }
-
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 func renderProgress(current formStep, width int) string {
 	var segs []string
@@ -470,21 +485,81 @@ func renderSelector(options []string, selected int, width int) string {
 	return strings.Join(rows, "\n")
 }
 
-func renderYesNo(skipRes bool, _ int) string {
-	yes := lipgloss.NewStyle().Padding(0, 3)
-	no := lipgloss.NewStyle().Padding(0, 3)
-	if skipRes {
-		yes = yes.Background(colorPrimary).Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
-		no = no.Foreground(colorMuted)
-	} else {
-		no = no.Background(colorPrimary).Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
-		yes = yes.Foreground(colorMuted)
+func renderConfigStep(m FormModel, width, height int) string {
+	rows := []string{
+		renderConfigToggleRow("Skip research", "Yes, skip", "No, include", m.skipRes, m.configIdx == configSkipResearch),
+		"",
+		"",
+		renderConfigToggleRow("Run as soon as ticket is made", "Yes, run", "No, wait", m.autoRun, m.configIdx == configAutoRun),
+		"",
+		"",
+		renderConfigInputRow("Raise PR against branch", m.prBaseIn.View(), m.configIdx == configPRBaseBranch, width),
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top,
-		yes.Render("Yes, skip"),
-		lipgloss.NewStyle().Foreground(colorMuted).Render("    "),
-		no.Render("No, include"),
-	)
+	for len(rows) < height {
+		rows = append(rows, "")
+	}
+	return strings.Join(rows[:height], "\n")
+}
+
+func renderConfigToggleRow(label, yesLabel, noLabel string, enabled, selected bool) string {
+	title := lipgloss.NewStyle().Foreground(colorMuted).Render(label)
+	if selected {
+		title = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render("▶ " + label)
+	}
+	options := renderRadioOptions(enabled, yesLabel, noLabel, selected)
+	return title + "\n\n" + options
+}
+
+func renderConfigInputRow(label, value string, selected bool, width int) string {
+	title := lipgloss.NewStyle().Foreground(colorMuted).Render(label)
+	if selected {
+		title = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render("▶ " + label)
+	}
+	line := strings.TrimSpace(strings.ReplaceAll(value, "\n", ""))
+	if line == "" {
+		line = lipgloss.NewStyle().Foreground(colorMuted).Render("master")
+	}
+	border := colorMuted
+	if selected {
+		border = colorPrimary
+	}
+	input := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(border).
+		Padding(0, 1).
+		Width(width - 2).
+		Render(line)
+	return title + "\n" + input
+}
+
+func renderRadioOptions(enabled bool, yesLabel, noLabel string, selected bool) string {
+	activeStyle := lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
+	inactiveStyle := lipgloss.NewStyle().Foreground(colorMuted)
+
+	yesMarker := "○"
+	noMarker := "○"
+	if enabled {
+		yesMarker = "◉"
+	} else {
+		noMarker = "◉"
+	}
+
+	yesText := yesMarker + " " + yesLabel
+	noText := noMarker + " " + noLabel
+	if selected {
+		if enabled {
+			yesText = activeStyle.Render(yesText)
+			noText = inactiveStyle.Render(noText)
+		} else {
+			yesText = inactiveStyle.Render(yesText)
+			noText = activeStyle.Render(noText)
+		}
+	} else {
+		yesText = inactiveStyle.Render(yesText)
+		noText = inactiveStyle.Render(noText)
+	}
+
+	return "  " + yesText + "\n" + "  " + noText
 }
 
 func visLen(s string) int { return len(stripANSI(s)) }

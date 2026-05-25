@@ -1,9 +1,9 @@
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/agrajgarg/orka/internal/config"
 	"github.com/agrajgarg/orka/internal/state"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 type AppModel struct {
@@ -72,6 +72,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if found != nil {
 				tm := NewTaskModel(*found, m.st, m.statePath, m.cfg, m.width, m.height)
 				m.task = &tm
+				if msg.AutoLaunch {
+					updated, launchCmd := tm.launchAgent()
+					tm = updated
+					m.task = &tm
+					return m, tea.Batch(tm.Init(), launchCmd)
+				}
 				return m, tm.Init()
 			}
 			return m, nil
