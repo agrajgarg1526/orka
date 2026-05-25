@@ -3,7 +3,7 @@ package github
 import (
 	"encoding/json"
 	"fmt"
-	"os"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -21,17 +21,16 @@ func EnsureTaskPR(projectDir string, task *state.Task, finalize bool) (string, e
 		return "", fmt.Errorf("gh is not installed")
 	}
 
-	dir := projectDir
-	wtDir := worktree.WorktreePath(projectDir, task.Branch)
-	if info, err := os.Stat(wtDir); err == nil && info.IsDir() {
-		dir = wtDir
+	dir, err := worktree.SetupFromBase(projectDir, task.Branch, task.PRBaseBranch)
+	if err != nil {
+		return "", fmt.Errorf("setup worktree for %q: %w", task.Branch, err)
 	}
 
 	baseRef, err := resolveRef(dir, task.PRBaseBranch)
 	if err != nil {
 		return "", fmt.Errorf("resolve base branch %q: %w", task.PRBaseBranch, err)
 	}
-	ahead, err := revListCount(dir, baseRef+".."+task.Branch)
+	ahead, err := revListCount(dir, baseRef+"..HEAD")
 	if err != nil {
 		return "", fmt.Errorf("compare %s..%s: %w", baseRef, task.Branch, err)
 	}
@@ -39,11 +38,15 @@ func EnsureTaskPR(projectDir string, task *state.Task, finalize bool) (string, e
 		return "", nil
 	}
 
-	if err := pushBranch(dir, task.Branch); err != nil {
+	if err := pushHead(dir, task.Branch); err != nil {
 		return "", err
 	}
 
-	number, url, err := findOpenPR(dir, task.Branch)
+	repo, err := remoteRepo(dir)
+	if err != nil {
+		return "", err
+	}
+	number, prURL, err := findOpenPR(dir, repo, task.Branch)
 	if err != nil {
 		return "", err
 	}
@@ -51,25 +54,21 @@ func EnsureTaskPR(projectDir string, task *state.Task, finalize bool) (string, e
 	body := prBody(task)
 
 	if number == 0 {
-		args := []string{"pr", "create", "--base", task.PRBaseBranch, "--head", task.Branch, "--title", title, "--body", body}
-		if assignee, err := currentUser(dir); err == nil && assignee != "" {
-			args = append(args, "--assignee", assignee)
-		}
-		out, err := runOutput(dir, "gh", args...)
+		url, err := createPR(dir, repo, task, title, body)
 		if err != nil {
 			return "", fmt.Errorf("create pr: %w", err)
 		}
-		return strings.TrimSpace(out), nil
-	}
-
-	args := []string{"pr", "edit", strconv.Itoa(number), "--title", title, "--base", task.PRBaseBranch}
-	if _, err := runOutput(dir, "gh", args...); err != nil {
-		return "", fmt.Errorf("edit pr #%d: %w", number, err)
-	}
-	if url != "" {
 		return url, nil
 	}
-	return prURL(dir, number)
+
+	updatedURL, err := updatePR(dir, repo, number, title, task.PRBaseBranch)
+	if err != nil {
+		return "", fmt.Errorf("edit pr #%d: %w", number, err)
+	}
+	if updatedURL != "" {
+		return updatedURL, nil
+	}
+	return prURL, nil
 }
 
 func prTitle(title string, finalize bool) string {
@@ -90,22 +89,73 @@ func prBody(task *state.Task) string {
 	return "Automated PR created by orka."
 }
 
-func currentUser(dir string) (string, error) {
-	out, err := runOutput(dir, "gh", "api", "user", "--jq", ".login")
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out), nil
+type repoRef struct {
+	Owner string
+	Name  string
 }
 
-func findOpenPR(dir, branch string) (int, string, error) {
-	out, err := runOutput(dir, "gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,url")
+func remoteRepo(dir string) (repoRef, error) {
+	out, err := runOutput(dir, "git", "remote", "get-url", "origin")
+	if err != nil {
+		return repoRef{}, fmt.Errorf("get origin remote: %w", err)
+	}
+	repo, err := parseRemoteRepo(strings.TrimSpace(out))
+	if err != nil {
+		return repoRef{}, fmt.Errorf("parse origin remote: %w", err)
+	}
+	return repo, nil
+}
+
+func parseRemoteRepo(raw string) (repoRef, error) {
+	raw = strings.TrimSpace(strings.TrimSuffix(raw, ".git"))
+	if raw == "" {
+		return repoRef{}, fmt.Errorf("empty remote URL")
+	}
+
+	if u, err := url.Parse(raw); err == nil && u.Scheme != "" {
+		path := strings.Trim(strings.TrimSuffix(u.Path, ".git"), "/")
+		return parseOwnerRepoPath(path)
+	}
+
+	if i := strings.LastIndex(raw, ":"); i >= 0 {
+		return parseOwnerRepoPath(raw[i+1:])
+	}
+	return parseOwnerRepoPath(raw)
+}
+
+func parseOwnerRepoPath(path string) (repoRef, error) {
+	path = strings.Trim(strings.TrimSuffix(path, ".git"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		return repoRef{}, fmt.Errorf("expected owner/repo, got %q", path)
+	}
+	owner := parts[len(parts)-2]
+	name := parts[len(parts)-1]
+	if owner == "" || name == "" {
+		return repoRef{}, fmt.Errorf("expected owner/repo, got %q", path)
+	}
+	return repoRef{Owner: owner, Name: name}, nil
+}
+
+func findOpenPR(dir string, repo repoRef, branch string) (int, string, error) {
+	out, err := runOutput(
+		dir,
+		"gh",
+		"api",
+		repo.apiPath("pulls"),
+		"-X",
+		"GET",
+		"-f",
+		"head="+repo.Owner+":"+branch,
+		"-f",
+		"state=open",
+	)
 	if err != nil {
 		return 0, "", fmt.Errorf("list prs for %s: %w", branch, err)
 	}
 	var prs []struct {
-		Number int    `json:"number"`
-		URL    string `json:"url"`
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
 	}
 	if err := json.Unmarshal([]byte(out), &prs); err != nil {
 		return 0, "", fmt.Errorf("decode pr list: %w", err)
@@ -113,19 +163,68 @@ func findOpenPR(dir, branch string) (int, string, error) {
 	if len(prs) == 0 {
 		return 0, "", nil
 	}
-	return prs[0].Number, prs[0].URL, nil
+	return prs[0].Number, prs[0].HTMLURL, nil
 }
 
-func prURL(dir string, number int) (string, error) {
-	out, err := runOutput(dir, "gh", "pr", "view", strconv.Itoa(number), "--json", "url", "--jq", ".url")
+func createPR(dir string, repo repoRef, task *state.Task, title, body string) (string, error) {
+	out, err := runOutput(
+		dir,
+		"gh",
+		"api",
+		repo.apiPath("pulls"),
+		"-X",
+		"POST",
+		"-f",
+		"title="+title,
+		"-f",
+		"head="+task.Branch,
+		"-f",
+		"base="+task.PRBaseBranch,
+		"-f",
+		"body="+body,
+	)
 	if err != nil {
-		return "", fmt.Errorf("view pr #%d: %w", number, err)
+		return "", err
 	}
-	return strings.TrimSpace(out), nil
+	return decodeHTMLURL(out)
 }
 
-func pushBranch(dir, branch string) error {
-	if _, err := runOutput(dir, "git", "push", "-u", "origin", branch); err != nil {
+func updatePR(dir string, repo repoRef, number int, title, baseBranch string) (string, error) {
+	out, err := runOutput(
+		dir,
+		"gh",
+		"api",
+		repo.apiPath("pulls", strconv.Itoa(number)),
+		"-X",
+		"PATCH",
+		"-f",
+		"title="+title,
+		"-f",
+		"base="+baseBranch,
+	)
+	if err != nil {
+		return "", err
+	}
+	return decodeHTMLURL(out)
+}
+
+func decodeHTMLURL(raw string) (string, error) {
+	var res struct {
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		return "", fmt.Errorf("decode pr response: %w", err)
+	}
+	return res.HTMLURL, nil
+}
+
+func (r repoRef) apiPath(parts ...string) string {
+	all := append([]string{"repos", r.Owner, r.Name}, parts...)
+	return strings.Join(all, "/")
+}
+
+func pushHead(dir, branch string) error {
+	if _, err := runOutput(dir, "git", "push", "-u", "origin", "HEAD:refs/heads/"+branch); err != nil {
 		return fmt.Errorf("push branch %q: %w", branch, err)
 	}
 	return nil

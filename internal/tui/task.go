@@ -165,7 +165,7 @@ func (m TaskModel) launchAgent() (TaskModel, tea.Cmd) {
 
 	dir := projectDir
 	if projectDir != "" && m.task.Branch != "" {
-		wtPath, err := worktree.Setup(projectDir, m.task.Branch)
+		wtPath, err := worktree.SetupFromBase(projectDir, m.task.Branch, m.task.PRBaseBranch)
 		if err != nil {
 			errMsg := fmt.Sprintf("worktree setup: %s", err)
 			return m, func() tea.Msg {

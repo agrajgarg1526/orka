@@ -5,16 +5,25 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Setup ensures a git branch and worktree exist for the given branch name,
 // rooted at projectDir. Returns the worktree path.
 // If the worktree already exists it is returned as-is.
 func Setup(projectDir, branchName string) (string, error) {
+	return SetupFromBase(projectDir, branchName, "")
+}
+
+// SetupFromBase ensures a git branch and worktree exist for the given branch
+// name, creating new branches from baseBranch when one is provided.
+func SetupFromBase(projectDir, branchName, baseBranch string) (string, error) {
 	wtPath := WorktreePath(projectDir, branchName)
 
-	// If the worktree directory already exists, assume it's set up correctly.
 	if _, err := os.Stat(wtPath); err == nil {
+		if err := verifyWorktreeBranch(wtPath, branchName); err != nil {
+			return "", err
+		}
 		return wtPath, nil
 	}
 
@@ -28,11 +37,18 @@ func Setup(projectDir, branchName string) (string, error) {
 		}
 	} else {
 		// Create branch and worktree together.
-		if err := run(projectDir, "git", "worktree", "add", "-b", branchName, wtPath); err != nil {
+		args := []string{"git", "worktree", "add", "-b", branchName, wtPath}
+		if startPoint := resolveStartPoint(projectDir, baseBranch); startPoint != "" {
+			args = append(args, startPoint)
+		}
+		if err := run(projectDir, args...); err != nil {
 			return "", fmt.Errorf("create worktree+branch %q: %w", branchName, err)
 		}
 	}
 
+	if err := verifyWorktreeBranch(wtPath, branchName); err != nil {
+		return "", err
+	}
 	return wtPath, nil
 }
 
@@ -58,17 +74,63 @@ func WorktreePath(projectDir, branchName string) string {
 }
 
 func branchExistsInRepo(dir, branch string) bool {
-	cmd := exec.Command("git", "rev-parse", "--verify", branch)
+	return refExists(dir, "refs/heads/"+branch)
+}
+
+func resolveStartPoint(dir, baseBranch string) string {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return ""
+	}
+	candidates := []string{
+		baseBranch,
+		"refs/heads/" + baseBranch,
+		"refs/remotes/origin/" + baseBranch,
+	}
+	for _, candidate := range candidates {
+		if refExists(dir, candidate) {
+			return candidate
+		}
+	}
+	return baseBranch
+}
+
+func verifyWorktreeBranch(dir, branch string) error {
+	actual, err := currentBranch(dir)
+	if err != nil {
+		return fmt.Errorf("inspect worktree %q: %w", dir, err)
+	}
+	if actual != branch {
+		return fmt.Errorf("worktree %q is on branch %q, expected %q", dir, actual, branch)
+	}
+	return nil
+}
+
+func currentBranch(dir string) (string, error) {
+	out, err := output(dir, "git", "branch", "--show-current")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func refExists(dir, ref string) bool {
+	cmd := exec.Command("git", "rev-parse", "--verify", ref)
 	cmd.Dir = dir
 	return cmd.Run() == nil
 }
 
-func run(dir string, args ...string) error {
+func output(dir string, args ...string) (string, error) {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%w\n%s", err, string(out))
+		return "", fmt.Errorf("%w\n%s", err, string(out))
 	}
-	return nil
+	return string(out), nil
+}
+
+func run(dir string, args ...string) error {
+	_, err := output(dir, args...)
+	return err
 }

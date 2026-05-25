@@ -109,9 +109,10 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if projectDir != "" {
 					branch := msg.Result.Branch
+					baseBranch := msg.Result.PRBaseBranch
 					dir := projectDir
 					cmds = append(cmds, func() tea.Msg {
-						worktree.Setup(dir, branch) //nolint:errcheck
+						worktree.SetupFromBase(dir, branch, baseBranch) //nolint:errcheck
 						return nil
 					})
 				}
