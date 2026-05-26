@@ -450,11 +450,36 @@ func currentBranch(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// mergeBase finds the common ancestor between HEAD and the repo's default branch
+// (tries main, master, origin/main, origin/master). Returns "" on failure.
+func mergeBase(dir string) string {
+	for _, base := range []string{"main", "master", "origin/main", "origin/master"} {
+		cmd := exec.Command("git", "merge-base", "HEAD", base)
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		if err == nil && len(out) > 0 {
+			return strings.TrimSpace(string(out))
+		}
+	}
+	return ""
+}
+
 // gitShortStat returns a one-line summary like "3 files changed, 42 insertions(+), 7 deletions(-)".
+// It diffs from the merge-base with the default branch so committed changes are included.
 func gitShortStat(dir string) string {
 	if dir == "" {
 		return ""
 	}
+	base := mergeBase(dir)
+	if base != "" {
+		cmd := exec.Command("git", "diff", "--shortstat", base)
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		if err == nil && len(out) > 0 {
+			return strings.TrimSpace(string(out))
+		}
+	}
+	// Fallback: uncommitted changes only
 	cmd := exec.Command("git", "diff", "--shortstat", "HEAD")
 	cmd.Dir = dir
 	out, err := cmd.Output()
@@ -469,11 +494,22 @@ func gitShortStat(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// gitDiff returns the full diff of uncommitted changes in dir.
+// gitDiff returns the full diff of all changes since the branch diverged from the default branch,
+// including committed changes. Falls back to uncommitted-only if no merge-base is found.
 func gitDiff(dir string) string {
 	if dir == "" {
 		return ""
 	}
+	base := mergeBase(dir)
+	if base != "" {
+		cmd := exec.Command("git", "diff", base)
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		if err == nil && len(out) > 0 {
+			return strings.TrimRight(string(out), "\n")
+		}
+	}
+	// Fallback: uncommitted changes only
 	cmd := exec.Command("git", "diff", "HEAD")
 	cmd.Dir = dir
 	out, err := cmd.Output()
